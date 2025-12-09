@@ -1,0 +1,26 @@
+# codework/Python/xrandrw/systemd/xrandrw.service
+[Unit]
+Description=xrandrw: automatic X11 display hotplug policy (dwm)
+Wants=dwm-session.target
+After=dwm-session.target
+PartOf=dwm-session.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=WALL=%h/.local/share/backgrounds/space.jpg
+Environment=LOG_LEVEL=debug
+# Environment=LOG_FILE=%h/.local/state/xrandrw/xrandrw.log
+# Optional: USE_XWALLPAPER=1 ; HIDPI_WIDTH=3200 ; POLL_INTERVAL=1 ; PREF_DEFAULT_SIDE=right-of
+
+ExecStart=%h/.local/bin/xrandrw --daemon
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=dwm-session.target

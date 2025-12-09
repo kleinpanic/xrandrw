@@ -1,0 +1,24 @@
+# Copy to ~/.config/xrandrw.conf (user) or /etc/xdg/xrandrw.conf (system).
+# Values can also be set via environment; env wins over file.
+
+# 0 = use feh/fehbg; 1 = use xwallpaper
+USE_XWALLPAPER=1
+
+# Wallpaper path (used by feh/xwallpaper)
+WALL="$HOME/Pictures/wallpaper.jpg"
+
+# Treat eDP as HiDPI if preferred-mode width >= this
+HIDPI_WIDTH=3200
+
+# Watch poll interval (seconds)
+POLL_INTERVAL=1
+
+# Logging: none|err|info|notice|debug (notice≈info)
+LOG_LEVEL=notice
+
+# Optional JSON log file (structured logs). Comment out to disable.
+# LOG_FILE="$HOME/.local/state/xrandrw/xrandrw.log"
+
+# Default side for new/unknown monitors: right-of|left-of|above|below
+PREF_DEFAULT_SIDE=right-of
+
