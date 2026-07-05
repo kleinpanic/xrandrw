@@ -1,8 +1,12 @@
 from __future__ import annotations
+import fcntl
 import hashlib
 import json
 import logging
+import os
+import tempfile
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -26,12 +30,48 @@ def load_state() -> Dict[str, dict]:
         pass
     return {"profiles": {}, "identity_map": {}}
 
-def save_state(st: Dict[str, dict]) -> None:
+def _atomic_write_json(path: Path, obj) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = json.dumps(obj, indent=2, sort_keys=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps(st, indent=2, sort_keys=True))
-    except Exception:
-        pass
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())          # durability: data on disk before the rename
+        os.replace(tmp, path)             # atomic swap on the same filesystem
+    except BaseException:
+        try:
+            os.unlink(tmp)                # don't leak the temp file on failure
+        except OSError:
+            pass
+        raise
+
+def save_state(st: Dict[str, dict], path: Path = STATE_PATH) -> None:
+    try:
+        _atomic_write_json(path, st)
+    except Exception as e:
+        # D-01/A3: a failed atomic write must be visible, not silently swallowed;
+        # log ERROR and continue (do NOT abort the caller's apply pass).
+        logging.getLogger("xrandrw").error("state_write_fail: %s", e)
+
+def _open_lock_fd(path) -> int:
+    # O_NOFOLLOW refuses a symlinked final component (CWE-59 -> OSError ELOOP).
+    return os.open(str(path), os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+
+@contextmanager
+def state_lock(lock_path):
+    # Load-bearing invariant (RESEARCH Pattern 3): the state-lock is acquired INNER,
+    # never while waiting for the apply-lock. apply_once holds the apply-lock from
+    # outside before taking this; set_pref takes ONLY this lock. => no cycle, no deadlock (D-03a).
+    # Separate, never-replaced lock file: os.replace on state.json swaps its inode,
+    # so an flock on state.json itself would NOT serialize across writers.
+    fd = _open_lock_fd(lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)   # blocking; the RMW critical section is short
+        yield
+    finally:
+        os.close(fd)                     # closing the fd releases the flock
 
 def ident_keys(o: Output) -> List[str]:
     keys = []
