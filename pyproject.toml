@@ -21,6 +21,7 @@ dependencies = ["python-xlib>=0.31"]
 
 [project.optional-dependencies]
 journald = ["systemd-python"]
+wallpaper = ["Pillow"]
 test = ["pytest"]
 
 [project.scripts]
