@@ -21,6 +21,21 @@ def output_factory() -> Callable[..., Output]:
 
 
 @pytest.fixture
+def layout_pi4() -> str:
+    return "DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
+
+
+@pytest.fixture
+def frozen_pi4_argv() -> list:
+    # Single source of truth shared with the Wave-2 apply test; do not redefine elsewhere.
+    return [
+        "xrandr",
+        "--output", "DSI-1", "--primary", "--mode", "800x480", "--pos", "1600x0", "--scale", "1x1",
+        "--output", "HDMI-1", "--mode", "1600x900", "--pos", "0x0", "--scale", "1x1",
+    ]
+
+
+@pytest.fixture
 def state_path(tmp_path):
     return tmp_path / "state.json"
 
