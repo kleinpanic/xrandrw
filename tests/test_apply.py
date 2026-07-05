@@ -15,6 +15,7 @@ def _env(tmp_path):
         "HIDPI_WIDTH": "3840",
         "WALL": str(tmp_path / "wall.png"),
         "USE_XWALLPAPER": "0",
+        "APPLY_BACKEND": "subprocess",
     }
 
 
@@ -54,10 +55,20 @@ def logger():
     return lg
 
 
-def test_backend_select(tmp_path):
+def test_backend_select(tmp_path, mock_x, logger, caplog):
+    calls, _set_outputs = mock_x
     assert isinstance(apply_mod.get_apply_backend({"APPLY_BACKEND": "subprocess"}), apply_mod.SubprocessBackend)
     assert isinstance(apply_mod.get_apply_backend({}), apply_mod.SubprocessBackend)
-    assert isinstance(apply_mod.get_apply_backend({"APPLY_BACKEND": "native"}), apply_mod.NativeRandRBackend)
+    nat = apply_mod.get_apply_backend({"APPLY_BACKEND": "native"})
+    assert isinstance(nat, apply_mod.NativeRandRBackend)
+
+    # native stub is warn-and-delegate: it must NOT perform a native apply — it logs an
+    # apply_backend warning and delegates to the subprocess primitive (recorded via mock_x).
+    with caplog.at_level(logging.WARNING, logger="xrandrw.test_apply"):
+        nat.auto_pos("DP-2", "right-of", "DP-1", logger)
+    assert calls == [("DP-2", "right-of", "DP-1")], "native stub must delegate to the subprocess op"
+    warns = [r for r in caplog.records if getattr(r, "event", None) == "apply_backend"]
+    assert warns and warns[0].levelno == logging.WARNING
 
 
 def test_lock_open_refuses_symlink(tmp_path, mock_x, logger, caplog):
