@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List, Optional, Tuple
 
 from xrandrw.logging_utils import _LEVEL_MAP
 
@@ -37,18 +37,50 @@ def _load_env_file(path: Path) -> Dict[str, str]:
         env[k] = v
     return env
 
-def load_config() -> Dict[str, str]:
+# Runtime lock directory: per-user, never world-writable /tmp (HARD-02).
+def resolve_lock_dir() -> Path:
+    xrd = os.environ.get("XDG_RUNTIME_DIR")
+    if xrd and Path(xrd).is_dir():
+        return Path(xrd)
+    run_user = Path(f"/run/user/{os.getuid()}")
+    if run_user.is_dir():
+        return run_user
+    d = Path.home() / ".local/share/xrandrw"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+# Pure numeric guard: malformed config degrades to default instead of crashing (D-05).
+def _coerce_int(raw: str, default: str, minimum: int, use_float: bool = False) -> Tuple[int, Optional[str]]:
+    try:
+        v = int(float(raw)) if use_float else int(raw)
+        return max(minimum, v), None
+    except (ValueError, TypeError):
+        return max(minimum, int(default)), f"invalid value {raw!r}, using default {default!r}"
+
+def load_config() -> Tuple[Dict[str, str], List[str]]:
     env = dict(ENV_DEFAULTS)
     env.update(_load_env_file(CONF_SYS))
     env.update(_load_env_file(CONF_USER))
     for k in ENV_DEFAULTS.keys():
         if k in os.environ:
             env[k] = os.environ[k]
+    warnings: List[str] = []
+
+    def coerce(key: str, minimum: int, use_float: bool = False) -> str:
+        v, w = _coerce_int(env[key], ENV_DEFAULTS[key], minimum, use_float)
+        if w is not None:
+            warnings.append(f"{key}: {w}")
+        return str(v)
+
     env["USE_XWALLPAPER"] = "1" if env["USE_XWALLPAPER"] in ("1", "true", "yes") else "0"
-    env["HIDPI_WIDTH"] = str(int(env["HIDPI_WIDTH"]))
-    env["POLL_INTERVAL"] = str(max(1, int(float(env["POLL_INTERVAL"]))))
+    env["HIDPI_WIDTH"] = coerce("HIDPI_WIDTH", 0)
+    env["POLL_INTERVAL"] = coerce("POLL_INTERVAL", 1, use_float=True)
     if env["LOG_LEVEL"] not in _LEVEL_MAP:
         env["LOG_LEVEL"] = "notice"
-    env["EXCESS_WINDOW_SEC"] = str(max(5, int(env["EXCESS_WINDOW_SEC"])))
-    env["EXCESS_THRESHOLD"] = str(max(2, int(env["EXCESS_THRESHOLD"])))
-    return env
+    env["EXCESS_WINDOW_SEC"] = coerce("EXCESS_WINDOW_SEC", 5)
+    env["EXCESS_THRESHOLD"] = coerce("EXCESS_THRESHOLD", 2)
+
+    if env["LOCKFILE"] == ENV_DEFAULTS["LOCKFILE"]:
+        env["LOCKFILE"] = str(resolve_lock_dir() / "xrandrw.lock")
+    env["STATE_LOCKFILE"] = str(resolve_lock_dir() / "xrandrw.state.lock")
+    return env, warnings
