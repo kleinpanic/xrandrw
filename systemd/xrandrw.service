@@ -12,9 +12,9 @@ Environment=DISPLAY=:0
 Environment=XAUTHORITY=%h/.Xauthority
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 Environment=WALL=%h/.local/share/backgrounds/space.jpg
-Environment=LOG_LEVEL=debug
+Environment=LOG_LEVEL=notice
 # Environment=LOG_FILE=%h/.local/state/xrandrw/xrandrw.log
-# Optional: USE_XWALLPAPER=1 ; HIDPI_WIDTH=3200 ; POLL_INTERVAL=1 ; PREF_DEFAULT_SIDE=right-of
+# Optional: USE_XWALLPAPER=1 ; HIDPI_WIDTH=3200 ; PREF_DEFAULT_SIDE=right-of
 
 ExecStart=%h/.local/bin/xrandrw --daemon
 Restart=always
