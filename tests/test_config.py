@@ -55,6 +55,28 @@ def test_load_config_returns_warnings(monkeypatch, isolated_config):
     assert env["HIDPI_WIDTH"] == config.ENV_DEFAULTS["HIDPI_WIDTH"]
 
 
+def test_load_config_lean_poll_default(monkeypatch, isolated_config):
+    env, _ = load_config()
+    assert int(env["POLL_INTERVAL"]) >= 30
+
+
+def test_load_config_apply_backend_default(monkeypatch, isolated_config):
+    env, _ = load_config()
+    assert env["APPLY_BACKEND"] == "subprocess"
+
+
+def test_load_config_apply_backend_bogus_fallback(monkeypatch, isolated_config):
+    monkeypatch.setenv("APPLY_BACKEND", "bogus")
+    env, _ = load_config()
+    assert env["APPLY_BACKEND"] == "subprocess"
+
+
+def test_load_config_apply_backend_native_preserved(monkeypatch, isolated_config):
+    monkeypatch.setenv("APPLY_BACKEND", "native")
+    env, _ = load_config()
+    assert env["APPLY_BACKEND"] == "native"
+
+
 def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
     monkeypatch.delenv("LOCKFILE", raising=False)
     env, _ = load_config()
