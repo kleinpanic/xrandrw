@@ -11,7 +11,7 @@ from typing import Dict, List
 from xrandrw.config import load_config
 from xrandrw.logging_utils import _setup_logging, logev, wait_for_x
 from xrandrw.xrandr import read_xrandr, read_edids
-from xrandrw.state import load_state, save_state, ensure_profile, get_profile
+from xrandrw.state import load_state, save_state, ensure_profile, get_profile, state_lock
 from xrandrw.apply import apply_once, _sd_notify, _watchdog_thread
 from xrandrw.watch import stop_evt, watch_loop, spawn_xplugd, _install_signals
 
@@ -22,21 +22,25 @@ def set_pref(env: Dict[str, str], output_or_id: str, side: str, logger: logging.
         raise SystemExit(f"invalid side: {side} (valid: {', '.join(SIDES_VALID)})")
     outs = read_xrandr(logger)
     read_edids(outs, logger)
-    st = load_state()
-    matched: List[str] = []
-    for o in outs.values():
-        if not o.connected:
-            continue
-        pid = ensure_profile(o, st, logger, env["PREF_DEFAULT_SIDE"])
-        if o.name == output_or_id or ("edid:"+o.edid_sha1 == output_or_id if o.edid_sha1 else False) or ("conn:"+o.name == output_or_id):
-            get_profile(st, pid)["preferred_side"] = side
-            matched.append(pid)
-    if not matched and output_or_id in st.get("profiles", {}):
-        get_profile(st, output_or_id)["preferred_side"] = side
-        matched.append(output_or_id)
-    if not matched:
-        raise SystemExit(f"no such connected output or known id/profile: {output_or_id}")
-    save_state(st)
+    # HARD-03/D-03a: serialize the RMW against apply_once on the SHARED state-lock only.
+    # set_pref must NOT touch the apply-lock (env["LOCKFILE"]) — state-lock-only keeps the
+    # two-lock system acyclic (no process waits for the apply-lock while holding the state-lock).
+    with state_lock(env["STATE_LOCKFILE"]):
+        st = load_state()
+        matched: List[str] = []
+        for o in outs.values():
+            if not o.connected:
+                continue
+            pid = ensure_profile(o, st, logger, env["PREF_DEFAULT_SIDE"])
+            if o.name == output_or_id or ("edid:"+o.edid_sha1 == output_or_id if o.edid_sha1 else False) or ("conn:"+o.name == output_or_id):
+                get_profile(st, pid)["preferred_side"] = side
+                matched.append(pid)
+        if not matched and output_or_id in st.get("profiles", {}):
+            get_profile(st, output_or_id)["preferred_side"] = side
+            matched.append(output_or_id)
+        if not matched:
+            raise SystemExit(f"no such connected output or known id/profile: {output_or_id}")
+        save_state(st)
     logev(logger, logging.INFO, "set_pref", "preferred side updated", side=side, profiles=",".join(matched))
 
 def list_state():
@@ -49,8 +53,11 @@ def _event_source_from_env() -> str:
     return "manual"
 
 def main():
-    env = load_config()
+    env, cfg_warnings = load_config()
     logger = _setup_logging(env)
+    # D-05: load_config runs before logging exists, so it defers coercion warnings; replay them now.
+    for w in cfg_warnings:
+        logev(logger, logging.WARNING, "config_coerce_fallback", "config value fell back to default", detail=w)
     _install_signals(logger)
 
     ap = argparse.ArgumentParser(description="xrandrw: robust display policy manager")
