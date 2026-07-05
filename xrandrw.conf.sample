@@ -10,8 +10,9 @@ WALL="$HOME/Pictures/wallpaper.jpg"
 # Treat eDP as HiDPI if preferred-mode width >= this
 HIDPI_WIDTH=3200
 
-# Watch poll interval (seconds)
-POLL_INTERVAL=1
+# Slow safety-net poll interval (seconds). Hotplug is event-driven via RandR
+# notifications; this is only a fallback backstop, so keep it high (default 45).
+POLL_INTERVAL=45
 
 # Logging: none|err|info|notice|debug (notice≈info)
 LOG_LEVEL=notice

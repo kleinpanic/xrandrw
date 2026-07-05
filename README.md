@@ -36,7 +36,7 @@ pip install ".[journald]"
 |---------|-------------|
 | `xrandrw --apply` | Apply the layout once (default when no flag is given). |
 | `xrandrw --watch` | Poll topology and re-apply on change. |
-| `xrandrw --daemon` | Spawn `xplugd` if present, then watch (systemd entry point). |
+| `xrandrw --daemon` | Watch for display changes via event-driven RandR notifications and re-apply (systemd entry point). |
 | `xrandrw --print` | Print `xrandr --query` output and exit. |
 | `xrandrw --set-pref OUTPUT_OR_ID SIDE` | Set a display's preferred side: `right-of`, `left-of`, `above`, `below`. |
 | `xrandrw --list-state` | Dump the placement state JSON. |
