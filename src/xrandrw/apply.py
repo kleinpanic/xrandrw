@@ -1,4 +1,5 @@
 from __future__ import annotations
+import errno
 import fcntl
 import logging
 import os
@@ -10,8 +11,8 @@ from typing import Dict, List
 
 from xrandrw.logging_utils import run, wait_for_x, loge, logev
 from xrandrw.xrandr import Output, read_xrandr, read_edids
-from xrandrw.state import load_state, save_state, ensure_profile
-from xrandrw.policy import SIDES, is_internal_lcd, current_or_preferred_mode
+from xrandrw.state import load_state, save_state, ensure_profile, _open_lock_fd, state_lock
+from xrandrw.policy import is_internal_lcd, current_or_preferred_mode, assign_placements
 
 def xrandr_output_off(connector: str, logger: logging.Logger):
     run(["xrandr", "--output", connector, "--off"], logger=logger)
@@ -59,13 +60,26 @@ def scrub_stale(outs: Dict[str, Output], logger: logging.Logger):
 
 def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = "manual") -> None:
     lockfile = env["LOCKFILE"]
-    with open(lockfile, "w") as lf:
-        try:
-            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            loge(logger, logging.INFO, "apply_skip", "Another apply is running")
+    # HARD-02: open the apply-lock with O_NOFOLLOW; a symlinked lock path (CWE-59) raises ELOOP.
+    try:
+        fd = _open_lock_fd(lockfile)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            logev(logger, logging.WARNING, "lock_symlink_refused",
+                  "apply-lock path is a symlink; refusing to run", lockfile=str(lockfile))
             return
+        raise
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        loge(logger, logging.INFO, "apply_skip", "Another apply is running")
+        os.close(fd)
+        return
 
+    # HARD-03/03a lock-order invariant: the apply-lock is held OUTER (acquired above), the
+    # state-lock INNER (acquired below around the load_state->save_state span). We NEVER acquire
+    # the apply-lock while holding the state-lock => no lock cycle, no deadlock (D-03a).
+    try:
         wait_for_x(logger)
 
         try:
@@ -90,7 +104,8 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
             logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
             return
 
-        # Special-case Raspberry Pi 4 dual-head layout:
+        # Special-case Raspberry Pi 4 dual-head layout (OUT OF SCOPE for hardening — early-return
+        # BEFORE the state-lock/placement path so it never touches persistent state):
         # - DSI-1 is the built-in panel and should be primary
         # - HDMI-1 sits to the *left* of DSI-1
         # This matches:
@@ -110,98 +125,96 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
             logev(logger, logging.INFO, "apply_done", "apply: done (pi4 special-case)", source=event_source)
             return
 
-        st = load_state()
-        default_side = env["PREF_DEFAULT_SIDE"]
-        attach_stack: List[str] = st.setdefault("attach_stack", [])  # profile ids, earliest->latest
+        # HARD-03: single state-lock span wrapping the entire load_state -> mutate -> save_state
+        # read-modify-write, so a concurrent set_pref cannot interleave and lose an update.
+        with state_lock(env["STATE_LOCKFILE"]):
+            st = load_state()
+            default_side = env["PREF_DEFAULT_SIDE"]
+            attach_stack: List[str] = st.setdefault("attach_stack", [])  # profile ids, earliest->latest
 
-        # prefer internal as primary
-        internal = [o for o in connected if is_internal_lcd(o.name)]
-        if internal:
-            pnl = sorted(internal, key=lambda x: x.name)[0]
-            hidpi_threshold = int(env["HIDPI_WIDTH"])
-            cur = current_or_preferred_mode(pnl)
-            width = (cur[0] if cur else 0)
-            scale = "0.5x0.5" if width >= hidpi_threshold else "1x1"
-            logev(logger, logging.INFO, "primary_set", "eDP/LVDS primary",
-                  primary=pnl.name, mode=str(cur), scale=scale)
-            xrandr_auto_primary_scale(pnl.name, scale, logger)
+            # prefer internal as primary
+            internal = [o for o in connected if is_internal_lcd(o.name)]
+            if internal:
+                pnl = sorted(internal, key=lambda x: x.name)[0]
+                hidpi_threshold = int(env["HIDPI_WIDTH"])
+                cur = current_or_preferred_mode(pnl)
+                width = (cur[0] if cur else 0)
+                scale = "0.5x0.5" if width >= hidpi_threshold else "1x1"
+                logev(logger, logging.INFO, "primary_set", "eDP/LVDS primary",
+                      primary=pnl.name, mode=str(cur), scale=scale)
+                xrandr_auto_primary_scale(pnl.name, scale, logger)
 
-            exts = [o for o in connected if o.name != pnl.name]
-            pid_by_output: Dict[str, str] = {}
-            for o in exts:
-                pid_by_output[o.name] = ensure_profile(o, st, logger, default_side)
+                exts = [o for o in connected if o.name != pnl.name]
+                pid_by_output: Dict[str, str] = {}
+                for o in exts:
+                    pid_by_output[o.name] = ensure_profile(o, st, logger, default_side)
 
-            # update attach_stack: keep only currently connected pids, append new ones at end
-            cur_pids = [pid_by_output[o.name] for o in exts]
-            attach_stack = [pid for pid in attach_stack if pid in cur_pids]
-            for pid in cur_pids:
-                if pid not in attach_stack:
-                    attach_stack.append(pid)
-            st["attach_stack"] = attach_stack
+                # update attach_stack: keep only currently connected pids, append new ones at end
+                cur_pids = [pid_by_output[o.name] for o in exts]
+                attach_stack = [pid for pid in attach_stack if pid in cur_pids]
+                for pid in cur_pids:
+                    if pid not in attach_stack:
+                        attach_stack.append(pid)
+                st["attach_stack"] = attach_stack
 
-            # assignment: newest gets right-of, previous left-of, then above, below
-            desired_order = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
-            sides_order = ["right-of", "left-of", "above", "below"]
-            assigned_by_pid: Dict[str, str] = {}
-            for pid, side in zip(desired_order, sides_order):
-                assigned_by_pid[pid] = side
+                # HARD-04: newest-first order -> assign_placements chains the 5th+ external off the
+                # previously-placed one instead of overlapping on a 4-side cap.
+                ordered_pids = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
+                conn_by_pid = {pid: name for name, pid in pid_by_output.items()}
+                placements = assign_placements(ordered_pids, pnl.name)
+                for pid, rel_opt, anchor_ref in placements:
+                    connector = conn_by_pid[pid]
+                    if anchor_ref == pnl.name:
+                        anchor_connector = pnl.name
+                        logev(logger, logging.INFO, "place", "external placement (stack)",
+                              output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
+                    else:
+                        anchor_connector = conn_by_pid[anchor_ref]
+                        logev(logger, logging.INFO, "place_chain", "chained external placement",
+                              output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
+                    xrandr_auto_pos(connector, rel_opt, anchor_connector, logger)
+                    xrandr_rotate_left_if_portrait(connector, outs[connector], logger)
+            else:
+                # No internal; pick lexicographically first as primary
+                first = sorted(connected, key=lambda x: x.name)[0]
+                logev(logger, logging.INFO, "primary_set", "primary (no internal)", primary=first.name)
+                run(["xrandr", "--output", first.name, "--auto", "--primary"], logger=logger)
+                rest = [o for o in connected if o.name != first.name]
 
-            # fallback for >4 externals or any remaining
-            occupied: Dict[str, str] = {}
-            for o in exts:
-                pid = pid_by_output[o.name]
-                side = assigned_by_pid.get(pid)
-                if not side:
-                    side = next((s for s in SIDES if s not in occupied), default_side)
-                # reserve the side
-                if side in occupied:
-                    # pick a free one deterministically
-                    side = next((s for s in SIDES if s not in occupied), side)
-                occupied[side] = o.name
-                logev(logger, logging.INFO, "place", "external placement (stack)",
-                      output=o.name, side=side, anchor=pnl.name, profile=pid)
-                xrandr_auto_pos(o.name, side, pnl.name, logger)
-                xrandr_rotate_left_if_portrait(o.name, o, logger)
-        else:
-            # No internal; pick lexicographically first as primary
-            first = sorted(connected, key=lambda x: x.name)[0]
-            logev(logger, logging.INFO, "primary_set", "primary (no internal)", primary=first.name)
-            run(["xrandr", "--output", first.name, "--auto", "--primary"], logger=logger)
-            rest = [o for o in connected if o.name != first.name]
+                pid_by_output: Dict[str, str] = {}
+                for o in rest:
+                    pid_by_output[o.name] = ensure_profile(o, st, logger, default_side)
 
-            pid_by_output: Dict[str, str] = {}
-            for o in rest:
-                pid_by_output[o.name] = ensure_profile(o, st, logger, default_side)
+                # update attach_stack with current externals
+                cur_pids = [pid_by_output[o.name] for o in rest]
+                attach_stack = [pid for pid in st.setdefault("attach_stack", []) if pid in cur_pids]
+                for pid in cur_pids:
+                    if pid not in attach_stack:
+                        attach_stack.append(pid)
+                st["attach_stack"] = attach_stack
 
-            # update attach_stack with current externals
-            cur_pids = [pid_by_output[o.name] for o in rest]
-            attach_stack = [pid for pid in st.setdefault("attach_stack", []) if pid in cur_pids]
-            for pid in cur_pids:
-                if pid not in attach_stack:
-                    attach_stack.append(pid)
-            st["attach_stack"] = attach_stack
+                ordered_pids = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
+                conn_by_pid = {pid: name for name, pid in pid_by_output.items()}
+                placements = assign_placements(ordered_pids, first.name)
+                for pid, rel_opt, anchor_ref in placements:
+                    connector = conn_by_pid[pid]
+                    if anchor_ref == first.name:
+                        anchor_connector = first.name
+                        logev(logger, logging.INFO, "place", "external placement (stack)",
+                              output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
+                    else:
+                        anchor_connector = conn_by_pid[anchor_ref]
+                        logev(logger, logging.INFO, "place_chain", "chained external placement",
+                              output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
+                    xrandr_auto_pos(connector, rel_opt, anchor_connector, logger)
+                    xrandr_rotate_left_if_portrait(connector, outs[connector], logger)
 
-            desired_order = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
-            sides_order = ["right-of", "left-of", "above", "below"]
-            assigned_by_pid: Dict[str, str] = {pid: side for pid, side in zip(desired_order, sides_order)}
+            save_state(st)
 
-            occupied: Dict[str, str] = {}
-            for o in rest:
-                pid = pid_by_output[o.name]
-                side = assigned_by_pid.get(pid)
-                if not side:
-                    side = next((s for s in SIDES if s not in occupied), default_side)
-                if side in occupied:
-                    side = next((s for s in SIDES if s not in occupied), side)
-                occupied[side] = o.name
-                logev(logger, logging.INFO, "place", "external placement (stack)",
-                      output=o.name, side=side, anchor=first.name, profile=pid)
-                xrandr_auto_pos(o.name, side, first.name, logger)
-                xrandr_rotate_left_if_portrait(o.name, o, logger)
-
-        save_state(st)
         reapply_wallpaper(env, logger)
         logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
+    finally:
+        os.close(fd)  # closing the fd releases the apply-lock
 
 def _sd_notify(msg: str):
     addr = os.getenv("NOTIFY_SOCKET")
