@@ -4,7 +4,6 @@ BIN    ?= $(PREFIX)/bin
 SYSD   ?= $(HOME)/.config/systemd/user
 CONF   ?= $(HOME)/.config
 
-SRC    := xrandrw.py
 TARGET := xrandrw
 UNIT   := systemd/xrandrw.service
 CONF_SAMPLE := xrandrw.conf.sample
@@ -15,7 +14,7 @@ all:
 	@echo "Targets: install, uninstall, enable, disable"
 
 install:
-	install -Dm755 $(SRC) $(BIN)/$(TARGET)
+	pipx install --force .
 	install -Dm644 $(CONF_SAMPLE) $(CONF)/xrandrw.conf.sample
 	install -Dm644 $(UNIT) $(SYSD)/xrandrw.service
 	@echo "Run: systemctl --user daemon-reload"
