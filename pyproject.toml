@@ -21,6 +21,7 @@ dependencies = []
 
 [project.optional-dependencies]
 journald = ["systemd-python"]
+test = ["pytest"]
 
 [project.scripts]
 xrandrw = "xrandrw.cli:main"
@@ -34,3 +35,7 @@ where = ["src"]
 [tool.ruff]
 line-length = 110
 target-version = "py39"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
