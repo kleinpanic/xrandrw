@@ -113,6 +113,31 @@ def test_lock_acquire_order(tmp_path, mock_x, logger, monkeypatch):
     assert order.index(env["LOCKFILE"]) < order.index(env["STATE_LOCKFILE"])
 
 
+def test_profile_override(tmp_path, mock_x, logger, layout_pi4, frozen_pi4_argv, monkeypatch):
+    calls, set_outputs = mock_x
+    set_outputs(["DSI-1", "HDMI-1"])
+    env = _env(tmp_path)
+    # A conf-loaded LAYOUT_* profile key surviving in env selects the device profile.
+    env["LAYOUT_PI4"] = layout_pi4
+
+    # mock_x stubs run to a no-op; replace it with a spy to capture the assembled argv.
+    captured = []
+    monkeypatch.setattr(apply_mod, "run", lambda argv, **k: captured.append(argv))
+    # The profile-match path must early-return BEFORE the state-lock (D-03a): load_state must
+    # never be reached on a match.
+    monkeypatch.setattr(
+        apply_mod, "load_state",
+        lambda: (_ for _ in ()).throw(AssertionError("state must not be touched on profile match")),
+    )
+
+    apply_mod.apply_once(env, logger)
+
+    # Byte-equivalence: the profile assembled EXACTLY the frozen Pi4 argv.
+    assert captured == [frozen_pi4_argv]
+    # No generic placement ran (early-return before the attach-stack policy).
+    assert calls == []
+
+
 def test_placement_chains_beyond_four(tmp_path, mock_x, logger):
     calls, set_outputs = mock_x
     # DP-1 becomes primary (no internal); DP-2..DP-6 are 5 externals.
