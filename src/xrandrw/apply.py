@@ -7,7 +7,7 @@ import shutil
 import socket
 import threading
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Protocol
 
 from xrandrw.logging_utils import run, wait_for_x, loge, logev
 from xrandrw.xrandr import Output, read_xrandr, read_edids
@@ -34,6 +34,50 @@ def xrandr_rotate_left_if_portrait(connector: str, o: Output, logger: logging.Lo
         if h > w:
             run(["xrandr", "--output", connector, "--rotate", "left"], logger=logger)
 
+# ---------------- apply backend seam (D-03/D-03a) ----------------
+# The four mutation primitives apply_once drives. SubprocessBackend (default) wraps the
+# tested xrandr_* helpers verbatim; NativeRandRBackend is a SEAM-STUB — it warns and
+# delegates to the subprocess path (no native CRTC apply this phase, D-03a).
+class ApplyBackend(Protocol):
+    def output_off(self, connector: str, logger: logging.Logger): ...
+    def primary_scale(self, connector: str, scale: str, logger: logging.Logger): ...
+    def auto_pos(self, connector: str, rel_opt: str, anchor: str, logger: logging.Logger): ...
+    def rotate_left_if_portrait(self, connector: str, o: Output, logger: logging.Logger): ...
+
+class SubprocessBackend:
+    def output_off(self, connector: str, logger: logging.Logger):
+        xrandr_output_off(connector, logger)
+    def primary_scale(self, connector: str, scale: str, logger: logging.Logger):
+        xrandr_auto_primary_scale(connector, scale, logger)
+    def auto_pos(self, connector: str, rel_opt: str, anchor: str, logger: logging.Logger):
+        xrandr_auto_pos(connector, rel_opt, anchor, logger)
+    def rotate_left_if_portrait(self, connector: str, o: Output, logger: logging.Logger):
+        xrandr_rotate_left_if_portrait(connector, o, logger)
+
+class NativeRandRBackend:
+    # SEAM-STUB (D-03a): native CRTC apply is intentionally NOT implemented. Each op logs a
+    # warning and delegates to the subprocess primitive so a config typo degrades safely.
+    def _warn(self, op: str, logger: logging.Logger, **kw):
+        logev(logger, logging.WARNING, "apply_backend",
+              "native apply not implemented; using subprocess", op=op, **kw)
+    def output_off(self, connector: str, logger: logging.Logger):
+        self._warn("output_off", logger, connector=connector)
+        xrandr_output_off(connector, logger)
+    def primary_scale(self, connector: str, scale: str, logger: logging.Logger):
+        self._warn("primary_scale", logger, connector=connector)
+        xrandr_auto_primary_scale(connector, scale, logger)
+    def auto_pos(self, connector: str, rel_opt: str, anchor: str, logger: logging.Logger):
+        self._warn("auto_pos", logger, connector=connector)
+        xrandr_auto_pos(connector, rel_opt, anchor, logger)
+    def rotate_left_if_portrait(self, connector: str, o: Output, logger: logging.Logger):
+        self._warn("rotate_left_if_portrait", logger, connector=connector)
+        xrandr_rotate_left_if_portrait(connector, o, logger)
+
+def get_apply_backend(env: Dict[str, str]) -> ApplyBackend:
+    if env.get("APPLY_BACKEND") == "native":
+        return NativeRandRBackend()
+    return SubprocessBackend()
+
 def reapply_wallpaper(env: Dict[str, str], logger: logging.Logger):
     wall = env["WALL"]
     if env["USE_XWALLPAPER"] == "1":
@@ -52,11 +96,12 @@ def reapply_wallpaper(env: Dict[str, str], logger: logging.Logger):
         else:
             logev(logger, logging.INFO, "wallpaper_skip", "no feh/fehbg or file", file=wall)
 
-def scrub_stale(outs: Dict[str, Output], logger: logging.Logger):
+def scrub_stale(outs: Dict[str, Output], logger: logging.Logger, backend: ApplyBackend = None):
     # Only power off disconnected heads; avoid pre-apply resets that blank active screens
+    off = backend.output_off if backend is not None else xrandr_output_off
     for connector, o in outs.items():
         if not o.connected:
-            xrandr_output_off(connector, logger)
+            off(connector, logger)
 
 def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = "manual") -> None:
     lockfile = env["LOCKFILE"]
@@ -82,6 +127,9 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
     try:
         wait_for_x(logger)
 
+        # D-03: select the apply backend (subprocess default; native is a warn+delegate seam-stub)
+        backend = get_apply_backend(env)
+
         try:
             outs = read_xrandr(logger)
         except Exception as e:
@@ -91,7 +139,7 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
         logev(logger, logging.INFO, "apply_start", "apply: start", source=event_source)
 
         # Power off any newly disconnected heads only (avoid wiping transforms on active heads)
-        scrub_stale(outs, logger)
+        scrub_stale(outs, logger, backend)
 
         # reread + EDID
         outs = read_xrandr(logger)
@@ -142,7 +190,7 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                 scale = "0.5x0.5" if width >= hidpi_threshold else "1x1"
                 logev(logger, logging.INFO, "primary_set", "eDP/LVDS primary",
                       primary=pnl.name, mode=str(cur), scale=scale)
-                xrandr_auto_primary_scale(pnl.name, scale, logger)
+                backend.primary_scale(pnl.name, scale, logger)
 
                 exts = [o for o in connected if o.name != pnl.name]
                 pid_by_output: Dict[str, str] = {}
@@ -172,8 +220,8 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                         anchor_connector = conn_by_pid[anchor_ref]
                         logev(logger, logging.INFO, "place_chain", "chained external placement",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
-                    xrandr_auto_pos(connector, rel_opt, anchor_connector, logger)
-                    xrandr_rotate_left_if_portrait(connector, outs[connector], logger)
+                    backend.auto_pos(connector, rel_opt, anchor_connector, logger)
+                    backend.rotate_left_if_portrait(connector, outs[connector], logger)
             else:
                 # No internal; pick lexicographically first as primary
                 first = sorted(connected, key=lambda x: x.name)[0]
@@ -206,8 +254,8 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                         anchor_connector = conn_by_pid[anchor_ref]
                         logev(logger, logging.INFO, "place_chain", "chained external placement",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
-                    xrandr_auto_pos(connector, rel_opt, anchor_connector, logger)
-                    xrandr_rotate_left_if_portrait(connector, outs[connector], logger)
+                    backend.auto_pos(connector, rel_opt, anchor_connector, logger)
+                    backend.rotate_left_if_portrait(connector, outs[connector], logger)
 
             save_state(st)
 
