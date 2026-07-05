@@ -12,7 +12,8 @@ ENV_DEFAULTS = {
     "USE_XWALLPAPER": "0",                 # 0=feh/fehbg, 1=xwallpaper
     "WALL": str(Path.home() / ".local/share/wallpapers/space.jpg"),
     "HIDPI_WIDTH": "3200",
-    "POLL_INTERVAL": "1",                  # seconds; debounced internally
+    "POLL_INTERVAL": "45",                 # seconds; now slow safety-net timeout (D-06), not a tight loop
+    "APPLY_BACKEND": "subprocess",         # subprocess (default, tested) | native (opt-in, seam-stub) — D-03
     "LOG_LEVEL": "notice",                 # none|err|info|notice|debug
     "LOG_FILE": "",                        # optional file path (JSON lines)
     "LOCKFILE": "/tmp/xrandrw.lock",
@@ -74,7 +75,9 @@ def load_config() -> Tuple[Dict[str, str], List[str]]:
 
     env["USE_XWALLPAPER"] = "1" if env["USE_XWALLPAPER"] in ("1", "true", "yes") else "0"
     env["HIDPI_WIDTH"] = coerce("HIDPI_WIDTH", 0)
-    env["POLL_INTERVAL"] = coerce("POLL_INTERVAL", 1, use_float=True)
+    env["POLL_INTERVAL"] = coerce("POLL_INTERVAL", 5, use_float=True)
+    if env["APPLY_BACKEND"] not in ("subprocess", "native"):
+        env["APPLY_BACKEND"] = "subprocess"
     if env["LOG_LEVEL"] not in _LEVEL_MAP:
         env["LOG_LEVEL"] = "notice"
     env["EXCESS_WINDOW_SEC"] = coerce("EXCESS_WINDOW_SEC", 5)
