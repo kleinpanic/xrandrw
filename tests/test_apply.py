@@ -29,7 +29,7 @@ def mock_x(monkeypatch, output_factory):
 
     monkeypatch.setattr(apply_mod, "wait_for_x", lambda logger: None)
     monkeypatch.setattr(apply_mod, "read_edids", lambda outs, logger: None)
-    monkeypatch.setattr(apply_mod, "scrub_stale", lambda outs, logger: None)
+    monkeypatch.setattr(apply_mod, "scrub_stale", lambda outs, logger, backend=None: None)
     monkeypatch.setattr(apply_mod, "reapply_wallpaper", lambda env, logger: None)
     monkeypatch.setattr(apply_mod, "xrandr_auto_primary_scale", lambda c, s, logger: None)
     monkeypatch.setattr(apply_mod, "xrandr_rotate_left_if_portrait", lambda c, o, logger: None)
@@ -52,6 +52,12 @@ def logger():
     lg = logging.getLogger("xrandrw.test_apply")
     lg.setLevel(logging.DEBUG)
     return lg
+
+
+def test_backend_select(tmp_path):
+    assert isinstance(apply_mod.get_apply_backend({"APPLY_BACKEND": "subprocess"}), apply_mod.SubprocessBackend)
+    assert isinstance(apply_mod.get_apply_backend({}), apply_mod.SubprocessBackend)
+    assert isinstance(apply_mod.get_apply_backend({"APPLY_BACKEND": "native"}), apply_mod.NativeRandRBackend)
 
 
 def test_lock_open_refuses_symlink(tmp_path, mock_x, logger, caplog):
