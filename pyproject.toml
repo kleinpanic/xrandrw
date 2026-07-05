@@ -30,3 +30,7 @@ Homepage = "https://github.com/kleinpanic/xrandrw"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py39"

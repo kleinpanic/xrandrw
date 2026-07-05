@@ -30,7 +30,8 @@ def _load_env_file(path: Path) -> Dict[str, str]:
         if not s or s.startswith("#") or "=" not in s:
             continue
         k, v = s.split("=", 1)
-        k = k.strip(); v = v.strip()
+        k = k.strip()
+        v = v.strip()
         if (v.startswith('"') and v.endswith('"')) or (v.startswith("'") and v.endswith("'")):
             v = v[1:-1]
         env[k] = v

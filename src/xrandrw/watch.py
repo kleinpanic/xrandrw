@@ -1,5 +1,12 @@
 from __future__ import annotations
-import logging, os, shutil, signal, subprocess, sys, threading, time
+import logging
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import threading
+import time
 from typing import Dict, List
 
 from xrandrw.logging_utils import loge, logev

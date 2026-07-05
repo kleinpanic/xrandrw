@@ -1,5 +1,11 @@
 from __future__ import annotations
-import argparse, json, logging, os, subprocess, sys, threading
+import argparse
+import json
+import logging
+import os
+import subprocess
+import sys
+import threading
 from typing import Dict, List
 
 from xrandrw.config import load_config
