@@ -3,16 +3,16 @@ import errno
 import fcntl
 import logging
 import os
-import shutil
 import socket
 import threading
-from pathlib import Path
 from typing import Dict, List, Protocol
 
 from xrandrw.logging_utils import run, wait_for_x, loge, logev
 from xrandrw.xrandr import Output, read_xrandr, read_edids
 from xrandrw.state import load_state, save_state, ensure_profile, _open_lock_fd, state_lock
 from xrandrw.policy import is_internal_lcd, current_or_preferred_mode, assign_placements
+from xrandrw.profiles import parse_all_profiles, match_profile, build_xrandr_argv
+from xrandrw.wallpaper import apply_wallpaper
 
 def xrandr_output_off(connector: str, logger: logging.Logger):
     run(["xrandr", "--output", connector, "--off"], logger=logger)
@@ -79,22 +79,9 @@ def get_apply_backend(env: Dict[str, str]) -> ApplyBackend:
     return SubprocessBackend()
 
 def reapply_wallpaper(env: Dict[str, str], logger: logging.Logger):
-    wall = env["WALL"]
-    if env["USE_XWALLPAPER"] == "1":
-        if Path(wall).is_file() and shutil.which("xwallpaper"):
-            run(["xwallpaper", "--zoom", wall], logger=logger)
-            logev(logger, logging.INFO, "wallpaper", "xwallpaper", file=wall)
-        else:
-            logev(logger, logging.INFO, "wallpaper_skip", "xwallpaper missing or file not found", file=wall)
-    else:
-        if shutil.which("fehbg"):
-            run(["fehbg"], logger=logger)
-            loge(logger, logging.INFO, "wallpaper", "fehbg")
-        elif shutil.which("feh") and Path(wall).is_file():
-            run(["feh", "--no-fehbg", "--bg-fill", wall], logger=logger)
-            logev(logger, logging.INFO, "wallpaper", "feh", file=wall)
-        else:
-            logev(logger, logging.INFO, "wallpaper_skip", "no feh/fehbg or file", file=wall)
+    # Thin delegator to the pluggable wallpaper dispatch (WALL-01). The name is kept so the
+    # existing call sites and the mock_x monkeypatch continue to resolve here.
+    apply_wallpaper(env, logger)
 
 def scrub_stale(outs: Dict[str, Output], logger: logging.Logger, backend: ApplyBackend = None):
     # Only power off disconnected heads; avoid pre-apply resets that blank active screens
@@ -152,25 +139,17 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
             logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
             return
 
-        # Special-case Raspberry Pi 4 dual-head layout (OUT OF SCOPE for hardening — early-return
-        # BEFORE the state-lock/placement path so it never touches persistent state):
-        # - DSI-1 is the built-in panel and should be primary
-        # - HDMI-1 sits to the *left* of DSI-1
-        # This matches:
-        #   xrandr \
-        #     --output DSI-1  --primary --mode 800x480  --pos 1600x0 --scale 1x1 \
-        #     --output HDMI-1 --mode 1600x900         --pos 0x0    --scale 1x1
-        names = {o.name for o in connected}
-        if "DSI-1" in names and "HDMI-1" in names:
-            logev(logger, logging.INFO, "apply_pi4", "Raspberry Pi 4 dual-head layout",
-                  primary="DSI-1", left="HDMI-1")
-            run([
-                "xrandr",
-                "--output", "DSI-1", "--primary", "--mode", "800x480", "--pos", "1600x0", "--scale", "1x1",
-                "--output", "HDMI-1", "--mode", "1600x900", "--pos", "0x0", "--scale", "1x1",
-            ], logger=logger)
+        # Config-driven device profile override (PROF-01): a matched LAYOUT_* profile assembles
+        # a byte-equivalent xrandr argv and early-returns BEFORE the state-lock/placement path, so
+        # it never touches persistent state (D-03a). This generalizes the removed Pi4 hardcode.
+        profiles = parse_all_profiles(env)
+        match = match_profile(frozenset(o.name for o in connected), profiles)
+        if match is not None:
+            logev(logger, logging.INFO, "profile_match", "device profile matched",
+                  profile=match.name, connectors=sorted(match.connectors))
+            run(build_xrandr_argv(match), logger=logger)
             reapply_wallpaper(env, logger)
-            logev(logger, logging.INFO, "apply_done", "apply: done (pi4 special-case)", source=event_source)
+            logev(logger, logging.INFO, "apply_done", "apply: done (profile)", source=event_source)
             return
 
         # HARD-03: single state-lock span wrapping the entire load_state -> mutate -> save_state
