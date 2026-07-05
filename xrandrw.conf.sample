@@ -23,3 +23,18 @@ LOG_LEVEL=notice
 # Default side for new/unknown monitors: right-of|left-of|above|below
 PREF_DEFAULT_SIDE=right-of
 
+# Wallpaper backend selector. Empty = auto-detect; or force one of:
+#   feh | fehbg | xwallpaper | native
+# (native is the pure-Python Xlib+Pillow fallback; it needs the 'wallpaper'
+#  extra: pip install xrandrw[wallpaper])
+# WALLPAPER_ENGINE=
+
+# Device profiles: LAYOUT_<NAME> pins an exact layout for a set of connectors.
+# A profile matches when its connectors are all connected, and it overrides the
+# generic placement policy. Grammar (';'-separated outputs, ':'-separated fields):
+#   connector:mode:role:position[:transform]
+# role is 'primary' or 'secondary'; position is an absolute XxY offset.
+#
+# Pi4 users: uncomment to reproduce the pre-Phase-5 hardcoded DSI-1/HDMI-1 layout.
+# LAYOUT_PI4="DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
+
