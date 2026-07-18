@@ -161,3 +161,208 @@ def test_functional_degrade_to_empty(sock_path, tmp_path, monkeypatch, logger):
             sock_path=str(sock_path), logger=logger,
         )
     assert recs == []
+
+
+# ---------------------------------------------------------------------------
+# Coverage aim (Task 2): exercise the live WindowXReader seam + remaining
+# branches with a fake Display (mirrors FakeReadDisplay in test_native_read).
+# ---------------------------------------------------------------------------
+
+class _FakeWin:
+    def __init__(self, props):
+        self._props = props  # atom(int) -> prop object or absent
+
+    def get_full_property(self, atom, typ):
+        return self._props.get(atom)
+
+
+class _FakeXDisplay:
+    """Configurable stand-in for python-xlib Display for the seam tests."""
+
+    def __init__(self, *, atoms=None, props=None, has_ext=True,
+                 ids_reply=None, fail=frozenset()):
+        self._atoms = atoms or {"_NET_WM_PID": 1, "WM_CLIENT_MACHINE": 2}
+        self._props = props or {}
+        self._has_ext = has_ext
+        self._ids_reply = ids_reply
+        self._fail = fail
+        self.closed = False
+
+    def get_atom(self, name):
+        if "get_atom" in self._fail:
+            raise RuntimeError("atom boom")
+        return self._atoms[name]
+
+    def create_resource_object(self, kind, xid):
+        return _FakeWin(self._props)
+
+    def has_extension(self, name):
+        if "has_extension" in self._fail:
+            raise RuntimeError("ext query boom")
+        return self._has_ext
+
+    def res_query_client_ids(self, specs):
+        if "res" in self._fail:
+            raise RuntimeError("res boom")
+        return self._ids_reply
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_display(monkeypatch, fake):
+    monkeypatch.setattr(win_mod.display, "Display", lambda: fake)
+    return fake
+
+
+def test_seam_net_wm_pid_value_missing_and_error(monkeypatch, caplog):
+    # value present
+    fake = _patch_display(monkeypatch, _FakeXDisplay(
+        props={1: SimpleNamespace(value=[4321])}))
+    assert WindowXReader().net_wm_pid(0x1) == 4321
+    assert fake.closed
+    # property absent -> None
+    _patch_display(monkeypatch, _FakeXDisplay(props={}))
+    assert WindowXReader().net_wm_pid(0x1) is None
+    # non-positive -> None
+    _patch_display(monkeypatch, _FakeXDisplay(props={1: SimpleNamespace(value=[0])}))
+    assert WindowXReader().net_wm_pid(0x1) is None
+    # raised Xlib error -> None (logged)
+    _patch_display(monkeypatch, _FakeXDisplay(fail={"get_atom"}))
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        assert WindowXReader().net_wm_pid(0x1) is None
+    assert any(getattr(r, "event", None) == "window_pid_prop_fail" for r in caplog.records)
+
+
+def test_seam_client_machine_bytes_intarray_and_error(monkeypatch, caplog):
+    # bytes value with trailing NUL
+    _patch_display(monkeypatch, _FakeXDisplay(props={2: SimpleNamespace(value=b"myhost\x00")}))
+    assert WindowXReader().client_machine(0x1) == "myhost"
+    # int-array value (8-bit prop handed back as ints) -> "hi"
+    _patch_display(monkeypatch, _FakeXDisplay(props={2: SimpleNamespace(value=[104, 105])}))
+    assert WindowXReader().client_machine(0x1) == "hi"
+    # absent -> None
+    _patch_display(monkeypatch, _FakeXDisplay(props={}))
+    assert WindowXReader().client_machine(0x1) is None
+    # error -> None (logged)
+    _patch_display(monkeypatch, _FakeXDisplay(fail={"get_atom"}))
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        assert WindowXReader().client_machine(0x1) is None
+    assert any(getattr(r, "event", None) == "window_machine_fail" for r in caplog.records)
+
+
+def test_seam_has_xres_present_absent_and_error(monkeypatch, caplog):
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=True))
+    assert WindowXReader().has_xres() is True
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=False))
+    assert WindowXReader().has_xres() is False
+    # error path logs the degrade ONCE per reader
+    _patch_display(monkeypatch, _FakeXDisplay(fail={"has_extension"}))
+    rdr = WindowXReader()
+    with caplog.at_level(logging.INFO, logger="xrandrw"):
+        assert rdr.has_xres() is False
+        assert rdr.has_xres() is False  # second call must NOT log again
+    absents = [r for r in caplog.records if getattr(r, "event", None) == "window_xres_absent"]
+    assert len(absents) == 1
+
+
+def test_seam_xres_pid_present_guarded_and_error(monkeypatch, caplog):
+    reply = SimpleNamespace(ids=[SimpleNamespace(spec=SimpleNamespace(mask=2), value=[9090])])
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=True, ids_reply=reply))
+    assert WindowXReader().xres_pid(0x1) == 9090
+    # XRes absent -> guard returns None
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=False))
+    assert WindowXReader().xres_pid(0x1) is None
+    # empty ids -> None
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=True, ids_reply=SimpleNamespace(ids=[])))
+    assert WindowXReader().xres_pid(0x1) is None
+    # query raises -> None (logged)
+    _patch_display(monkeypatch, _FakeXDisplay(has_ext=True, fail={"res"}))
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        assert WindowXReader().xres_pid(0x1) is None
+    assert any(getattr(r, "event", None) == "window_xres_degrade" for r in caplog.records)
+
+
+# --- remaining pure-branch gaps ---------------------------------------------
+
+def test_parse_starttime_short_line_raises():
+    from xrandrw.windows import parse_starttime_from_stat
+    with pytest.raises(ValueError):
+        parse_starttime_from_stat("1 (c) S 2 3")  # has ')' but < 20 trailing fields
+
+
+def test_read_proc_identity_comm_missing(tmp_path, caplog):
+    from xrandrw.windows import read_proc_identity
+    d = tmp_path / "77"
+    d.mkdir()
+    after = ["S"] + [str(i) for i in range(1, 19)] + ["500", "0", "0"]
+    (d / "stat").write_text("77 (x) " + " ".join(after) + "\n")  # no comm file
+    with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+        assert read_proc_identity(77, proc_root=str(tmp_path)) is None
+    assert any(getattr(r, "event", None) == "window_proc_missing" for r in caplog.records)
+
+
+def test_resolve_pid_reader_raises_is_caught(logger, caplog):
+    from xrandrw.windows import resolve_pid
+
+    def boom(xid):
+        raise RuntimeError("reader exploded")
+
+    reader = SimpleNamespace(client_machine=boom, net_wm_pid=lambda xid: None,
+                             xres_pid=lambda xid: None, has_xres=lambda: True)
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        assert resolve_pid(0x1, reader, hostname=HOST, logger=logger) is None
+    assert any(getattr(r, "event", None) == "window_resolve_fail" for r in caplog.records)
+
+
+def test_capture_default_seams_with_unavailable_ipc(tmp_path, monkeypatch, logger):
+    # reader=None/xreader=None construct the real seams (no X connection yet);
+    # get_monitors raising DwmIpcUnavailable returns [] before any live X read.
+    from xrandrw.dwmipc import DwmIpcUnavailable
+
+    def boom(path=None, **kw):
+        raise DwmIpcUnavailable("no socket")
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", boom)
+    recs = capture_windows(proc_root=str(tmp_path), hostname=HOST,
+                           sock_path="/nope", logger=logger)
+    assert recs == []
+
+
+def test_capture_malformed_client_skipped(tmp_path, monkeypatch, logger, caplog):
+    from xrandrw.dwmipc import DwmIpcUnavailable  # noqa: F401 (import parity)
+    proc_root = _make_proc(tmp_path)
+    outs = _outputs()
+    mons = [{"num": 0, "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+             "clients": {"all": [0x1400001]}}]
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    # malformed client: missing 'states' -> build_record raises KeyError -> skip
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client",
+                        lambda xid, path=None, **kw: {"name": "x", "tags": 1,
+                                                      "monitor_number": 0,
+                                                      "geometry": {"x": 0, "y": 0,
+                                                                   "width": 1, "height": 1}})
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        recs = capture_windows(reader=_fake_randr(outs), xreader=_fake_xreader(lambda xid: HOST),
+                               proc_root=proc_root, hostname=HOST,
+                               sock_path="/x", logger=logger)
+    assert recs == []
+    assert any(getattr(r, "event", None) == "window_capture_skip" for r in caplog.records)
+
+
+def test_capture_unmatched_monitor_pipeline(tmp_path, monkeypatch, logger):
+    # A monitor whose geometry matches no output -> record with output=None/edid=None.
+    proc_root = _make_proc(tmp_path)
+    outs = _outputs()
+    mons = [{"num": 5, "monitor_geometry": {"x": 700, "y": 700, "width": 640, "height": 480},
+             "clients": {"all": [0x1400001]}}]
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client",
+                        lambda xid, path=None, **kw: _CLIENT)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+    recs = capture_windows(reader=_fake_randr(outs), xreader=_fake_xreader(lambda xid: HOST),
+                           proc_root=proc_root, hostname=HOST,
+                           sock_path="/x", logger=logger)
+    assert len(recs) == 1
+    assert recs[0].output is None and recs[0].edid is None
