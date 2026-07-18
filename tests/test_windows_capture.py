@@ -272,6 +272,51 @@ def test_capture_malformed_clients_shape_skips_monitor_not_capture(tmp_path, mon
     assert len(skips) == 2, "both malformed monitors must log a graceful skip"
 
 
+@pytest.mark.parametrize("bad_geom", [None, ["x", "y"], {"x": 0, "y": 0}])
+def test_build_record_malformed_geometry_raises(bad_geom):
+    # WARNING 3: geometry that is None, a list, or a dict missing keys must raise
+    # (ValueError) so the per-window catch skips the record.
+    client = {"name": "app", "tags": 1, "monitor_number": 0,
+              "states": {"is_floating": False, "is_fullscreen": False},
+              "geometry": bad_geom}
+    with pytest.raises((ValueError, KeyError)):
+        build_record(0xABC, (1, 2, "c"), client, None, None)
+
+
+def test_capture_malformed_geometry_skips_that_window_only(tmp_path, monkeypatch, logger, caplog):
+    # WARNING 3 end-to-end: one client with bad geometry is skipped, the other
+    # (well-formed) is still captured.
+    _make_proc(tmp_path, 1234)
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="edidA"),
+        "DP-2": _out("DP-2", mode=(1920, 1080), position=(1920, 0), edid="edidB"),
+    }
+    mons = [
+        _mon(0, 0, 0, 1920, 1080, clients=[0x11]),
+        _mon(1, 1920, 0, 1920, 1080, clients=[0x22]),
+    ]
+
+    def client_for(xid, path=None, **kw):
+        mnum = 0 if xid == 0x11 else 1
+        base = {"name": "app", "tags": 1, "monitor_number": mnum,
+                "states": {"is_floating": False, "is_fullscreen": False}}
+        # xid 0x11 has malformed geometry (a list); 0x22 is well-formed.
+        base["geometry"] = ["bad"] if xid == 0x11 else {"current": {"x": 0, "y": 0, "width": 10, "height": 10}}
+        return base
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+        recs = capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                               proc_root=str(tmp_path), hostname="localhost",
+                               sock_path="/x", logger=logger)
+    assert len(recs) == 1
+    assert recs[0].output == "DP-2"
+    assert any(getattr(r, "event", None) == "window_capture_skip" for r in caplog.records)
+
+
 def test_capture_x_read_raises_returns_empty(tmp_path, monkeypatch, logger, caplog):
     # BLOCKER 2 (WR-01): a reader whose read() raises on a hotplug/X-restart race
     # must degrade to [] (like dwmipc-unavailable), never propagate out.

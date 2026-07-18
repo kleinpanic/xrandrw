@@ -335,16 +335,24 @@ class WindowRecord:
         return cls(**d)
 
 
+_GEOMETRY_KEYS = ("x", "y", "width", "height")
+
+
 def _client_geometry(client: Dict[str, Any]) -> Dict[str, int]:
     """Return the client's ``{x,y,width,height}`` from nested or flat geometry.
 
     Real dwm returns nested ``geometry.current`` (spike 001); some replies carry
-    a flat ``geometry``. Raises ``KeyError`` on a missing geometry so the caller
-    turns a malformed client into a logged skip.
+    a flat ``geometry``. Raises ``KeyError`` on a missing ``geometry`` key and
+    ``ValueError`` on a geometry that is not a dict carrying all of
+    ``{x,y,width,height}`` (e.g. ``None``, a list, or a dict missing keys), so
+    the caller turns a malformed client into a logged skip (matches
+    ``build_record``'s documented "missing keys -> skip" contract).
     """
     geom = client["geometry"]
     if isinstance(geom, dict) and "current" in geom:
-        return geom["current"]
+        geom = geom["current"]
+    if not isinstance(geom, dict) or not all(k in geom for k in _GEOMETRY_KEYS):
+        raise ValueError("client geometry missing x/y/width/height")
     return geom
 
 
