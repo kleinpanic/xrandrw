@@ -27,7 +27,7 @@ import json
 import logging
 import os
 import struct
-from typing import Any, Iterable, Optional, Tuple
+from typing import Any, Iterable, Tuple
 
 from xrandrw.logging_utils import logev
 
@@ -129,3 +129,61 @@ def parse_header(header: bytes) -> Tuple[int, int]:
               reason="oversized", size=size, cap=MAX_REPLY_SIZE)
         raise DwmIpcUnavailable(f"reply size {size} exceeds cap {MAX_REPLY_SIZE}")
     return size, rtype
+
+
+def decode_reply(rtype: int, body: bytes) -> Any:
+    """Strip the trailing null terminator, then ``json.loads`` the reply body.
+
+    dwm replies are null-terminated C strings and ``size`` INCLUDES the
+    terminator, so it must be stripped before decoding (else json reports
+    "Extra data" at the null). An empty / terminator-only body decodes to
+    ``None`` without raising. A non-JSON or malformed-JSON body is re-raised as
+    :class:`DwmIpcUnavailable` so a ``json.JSONDecodeError`` never leaks to a
+    caller (T-08-01-E). This is a PURE function over bytes -- no sockets -- so
+    the SEC-01 boundary is directly fuzzable. Shape validation is layered on top
+    by :func:`validate_monitors` / :func:`validate_client`.
+    """
+    data = body.rstrip(b"\x00")
+    if not data:
+        return None
+    try:
+        return json.loads(data)
+    except (json.JSONDecodeError, ValueError, UnicodeDecodeError) as e:
+        logev(logger, logging.WARNING, "dwmipc_parse_reject", "reply json decode failed",
+              reason="bad_json", rtype=rtype)
+        raise DwmIpcUnavailable(f"reply json decode failed: {e}") from e
+
+
+# --- pure shape validators (SEC-01) ----------------------------------------
+
+def _require_list_of_dicts(obj: Any, required_keys: Iterable[str]) -> list:
+    """Return ``obj`` iff it is a non-empty list of dicts each having ``required_keys``."""
+    if not isinstance(obj, list) or not obj:
+        raise DwmIpcUnavailable(f"expected non-empty list, got {type(obj).__name__}")
+    for el in obj:
+        if not isinstance(el, dict):
+            raise DwmIpcUnavailable(f"expected list of dicts, element is {type(el).__name__}")
+        for key in required_keys:
+            if key not in el:
+                raise DwmIpcUnavailable(f"list element missing required key {key!r}")
+    return obj
+
+
+def _require_dict(obj: Any, required_keys: Iterable[str]) -> dict:
+    """Return ``obj`` iff it is a dict having every one of ``required_keys``."""
+    if not isinstance(obj, dict):
+        raise DwmIpcUnavailable(f"expected dict, got {type(obj).__name__}")
+    for key in required_keys:
+        if key not in obj:
+            raise DwmIpcUnavailable(f"dict missing required key {key!r}")
+    return obj
+
+
+def validate_monitors(obj: Any) -> list:
+    """Validate a GET_MONITORS reply: a non-empty list of monitor dicts."""
+    return _require_list_of_dicts(obj, ("num", "monitor_geometry"))
+
+
+def validate_client(obj: Any) -> dict:
+    """Validate a GET_DWM_CLIENT reply: a client dict with the expected keys."""
+    return _require_dict(obj, ("name", "tags", "geometry", "states"))
