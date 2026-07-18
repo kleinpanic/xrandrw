@@ -202,12 +202,19 @@ def read_proc_cmdline(pid: int, proc_root: str = "/proc") -> "str | None":
 
 
 def read_proc_identity(pid: int, proc_root: str = "/proc",
-                       logger: "logging.Logger | None" = None) -> "tuple[int, int, str] | None":
-    """Return ``(pid, starttime, comm)`` for ``pid`` or ``None`` (logged skip).
+                       logger: "logging.Logger | None" = None) -> "tuple[int, int, str, str | None] | None":
+    """Return ``(pid, starttime, comm, cmdline)`` for ``pid`` or ``None`` (skip).
 
-    On ANY failure (missing dir, dead pid, unparseable stat) log a
-    ``window_proc_missing`` event and return ``None`` -- a dead process is a
-    skip, never fatal (matches the dwmipc graceful-degrade ethos).
+    ``comm`` and ``cmdline`` are read in the SAME open sequence as ``stat``, and
+    ``starttime`` is re-read immediately afterward: if it changed, the PID was
+    reused by a different process between opens, so the atomic ``(pid, starttime)``
+    identity contract is broken and the record is dropped (returns ``None``). This
+    closes a TOCTOU where ``cmdline`` was read in a later, separate ``/proc`` open.
+
+    On ANY failure (missing dir, dead pid, unparseable stat, or a starttime that
+    moved) log a ``window_proc_missing`` event and return ``None`` -- a dead or
+    recycled process is a skip, never fatal (matches the dwmipc graceful-degrade
+    ethos).
     """
     try:
         with open(f"{proc_root}/{pid}/stat", "r") as f:
@@ -216,17 +223,25 @@ def read_proc_identity(pid: int, proc_root: str = "/proc",
         comm = read_proc_comm(pid, proc_root)
         if comm is None:
             raise ValueError("comm unreadable")
-        return (int(pid), starttime, comm)
+        cmdline = read_proc_cmdline(pid, proc_root)
+        # Re-read starttime in the same sequence: if the PID was recycled between
+        # opens, field 22 changes -> the (pid, starttime) identity is invalid.
+        with open(f"{proc_root}/{pid}/stat", "r") as f:
+            starttime_confirm = parse_starttime_from_stat(f.read())
+        if starttime_confirm != starttime:
+            raise ValueError("starttime changed between reads; pid reused")
+        return (int(pid), starttime, comm, cmdline)
     except (OSError, ValueError) as e:
         logev(logger or _LOG, logging.DEBUG, "window_proc_missing",
-              "process /proc entry missing or unparseable", pid=pid, error=str(e))
+              "process /proc entry missing, unparseable, or recycled",
+              pid=pid, error=str(e))
         return None
 
 
 def resolve_pid(xid, reader, *, hostname: "str | None" = None,
                 proc_root: str = "/proc",
-                logger: "logging.Logger | None" = None) -> "tuple[int, int, str] | None":
-    """Resolve a dwm client window ``xid`` to LOCAL ``(pid, starttime, comm)``.
+                logger: "logging.Logger | None" = None) -> "tuple[int, int, str, str | None] | None":
+    """Resolve a dwm client window ``xid`` to LOCAL ``(pid, starttime, comm, cmdline)``.
 
     WM-03 entry point. ``_NET_WM_PID`` is the PRIMARY pid; XRes
     ``res_query_client_ids`` is the fallback when the property is absent. A
@@ -356,16 +371,18 @@ def _client_geometry(client: Dict[str, Any]) -> Dict[str, int]:
     return geom
 
 
-def build_record(xid, identity, client, connector, edid,
-                 cmdline: Optional[str] = None) -> WindowRecord:
+def build_record(xid, identity, client, connector, edid) -> WindowRecord:
     """Build a :class:`WindowRecord` from an identity tuple + a dwm client dict.
 
-    ``identity`` is the ``(pid, starttime, comm)`` tuple from 09-01. Reads
-    ``monitor_number``, ``tags``, ``states.is_floating``, ``states.is_fullscreen``
-    and the geometry from the validated client dict; ``output``/``edid`` come from
-    the association. Missing nested keys raise (caller catches -> skip).
+    ``identity`` is the atomic ``(pid, starttime, comm, cmdline)`` tuple from
+    ``resolve_pid``/``read_proc_identity`` -- ``cmdline`` is read in the same
+    ``/proc`` open sequence as ``stat`` so it belongs to the SAME process as
+    ``(pid, starttime)`` (no separate later read). Reads ``monitor_number``,
+    ``tags``, ``states.is_floating``, ``states.is_fullscreen`` and the geometry
+    from the validated client dict; ``output``/``edid`` come from the
+    association. Missing nested keys raise (caller catches -> skip).
     """
-    pid, starttime, comm = identity
+    pid, starttime, comm, cmdline = identity
     states = client["states"]
     return WindowRecord(
         xid=int(xid),
@@ -462,9 +479,7 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
                 connector = mapping.get(mnum)
                 edid = (outs[connector].edid_sha1
                         if connector and connector in outs else None)
-                cmdline = read_proc_cmdline(identity[0], proc_root)
-                rec = build_record(xid, identity, client, connector, edid,
-                                   cmdline=cmdline)
+                rec = build_record(xid, identity, client, connector, edid)
                 records.append(rec)
                 logev(lg, logging.DEBUG, "window_capture",
                       "captured window state", xid=xid, pid=identity[0],

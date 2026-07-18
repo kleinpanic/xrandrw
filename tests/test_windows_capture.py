@@ -128,8 +128,8 @@ def _client(nested=True):
 
 
 def test_build_record_nested_geometry():
-    rec = build_record(0xABC, (1234, 555, "app"), _client(nested=True),
-                       "DP-2", "sha1edid", cmdline="app --flag")
+    rec = build_record(0xABC, (1234, 555, "app", "app --flag"),
+                       _client(nested=True), "DP-2", "sha1edid")
     assert rec.geometry == {"x": 1, "y": 2, "width": 300, "height": 400}
     assert (rec.monitor_number, rec.tags) == (1, 5)
     assert rec.is_floating is True and rec.is_fullscreen is False
@@ -139,7 +139,7 @@ def test_build_record_nested_geometry():
 
 
 def test_build_record_flat_geometry_fallback():
-    rec = build_record(0xABC, (1, 2, "c"), _client(nested=False), None, None)
+    rec = build_record(0xABC, (1, 2, "c", None), _client(nested=False), None, None)
     assert rec.geometry == {"x": 1, "y": 2, "width": 300, "height": 400}
     assert rec.output is None and rec.edid is None
 
@@ -280,7 +280,7 @@ def test_build_record_malformed_geometry_raises(bad_geom):
               "states": {"is_floating": False, "is_fullscreen": False},
               "geometry": bad_geom}
     with pytest.raises((ValueError, KeyError)):
-        build_record(0xABC, (1, 2, "c"), client, None, None)
+        build_record(0xABC, (1, 2, "c", None), client, None, None)
 
 
 def test_capture_malformed_geometry_skips_that_window_only(tmp_path, monkeypatch, logger, caplog):

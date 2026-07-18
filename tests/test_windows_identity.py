@@ -102,7 +102,34 @@ def test_read_proc_cmdline_empty_is_none(tmp_path):
 
 def test_read_proc_identity_ok(tmp_path):
     _make_proc(tmp_path, 1234, "st", 424242)
-    assert read_proc_identity(1234, proc_root=str(tmp_path)) == (1234, 424242, "st")
+    assert read_proc_identity(1234, proc_root=str(tmp_path)) == (
+        1234, 424242, "st", "prog --flag arg")
+
+
+def test_read_proc_identity_includes_cmdline_atomically(tmp_path):
+    # BLOCKER 4: cmdline is read INSIDE read_proc_identity (same open sequence as
+    # stat/comm), so it is part of the atomic identity, not a later separate read.
+    _make_proc(tmp_path, 1234, "st", 424242, cmdline=b"myprog\x00-a\x00-b\x00")
+    got = read_proc_identity(1234, proc_root=str(tmp_path))
+    assert got == (1234, 424242, "st", "myprog -a -b")
+
+
+def test_read_proc_identity_starttime_changed_is_dropped(tmp_path, monkeypatch, logger, caplog):
+    # BLOCKER 4 (TOCTOU): if starttime moves between the two stat reads, the PID
+    # was reused by a different process -> the (pid, starttime) identity is
+    # invalid and the record is dropped (None), never returned with mixed data.
+    import xrandrw.windows as win_mod
+    _make_proc(tmp_path, 1234, "st", 424242)
+    seq = iter([424242, 999999])  # first read one starttime, re-read a different one
+
+    def fake_parse(text):
+        return next(seq)
+
+    monkeypatch.setattr(win_mod, "parse_starttime_from_stat", fake_parse)
+    with caplog.at_level(logging.DEBUG, logger="xrandrw.test_windows_identity"):
+        got = read_proc_identity(1234, proc_root=str(tmp_path), logger=logger)
+    assert got is None, "a starttime that moved between reads must drop the record"
+    assert any(getattr(r, "event", None) == "window_proc_missing" for r in caplog.records)
 
 
 def test_read_proc_identity_missing_is_none(tmp_path, logger, caplog):
@@ -130,7 +157,7 @@ def test_resolve_pid_uses_net_wm_pid_without_xres(tmp_path, logger, caplog):
     with caplog.at_level(logging.DEBUG, logger="xrandrw.test_windows_identity"):
         got = resolve_pid(0xABC, reader, hostname="localhost",
                           proc_root=str(tmp_path), logger=logger)
-    assert got == (1234, 424242, "st")
+    assert got == (1234, 424242, "st", "prog --flag arg")
     assert calls["xres"] == 0, "_NET_WM_PID present -> xres must not be called"
     assert any(getattr(r, "event", None) == "window_pid_resolve" for r in caplog.records)
 
@@ -140,7 +167,7 @@ def test_resolve_pid_falls_back_to_xres(tmp_path, logger):
     reader = _reader(pid=None, machine="localhost", xres=2200)
     got = resolve_pid(0x1, reader, hostname="localhost",
                       proc_root=str(tmp_path), logger=logger)
-    assert got == (2200, 111, "app")
+    assert got == (2200, 111, "app", "prog --flag arg")
 
 
 def test_resolve_pid_nonlocal_machine_skipped(tmp_path, logger, caplog):
@@ -160,7 +187,7 @@ def test_resolve_pid_local_machine_matches_default_hostname(tmp_path, logger):
     reader = _reader(pid=321, machine=host)
     # hostname defaults to socket.gethostname() when None
     got = resolve_pid(0x1, reader, proc_root=str(tmp_path), logger=logger)
-    assert got == (321, 77, "loc")
+    assert got == (321, 77, "loc", "prog --flag arg")
 
 
 def test_resolve_pid_no_pid_returns_none(tmp_path, logger):
@@ -185,4 +212,4 @@ def test_resolve_pid_empty_machine_is_treated_as_local(tmp_path, logger):
     reader = _reader(pid=88, machine=None)
     got = resolve_pid(0x1, reader, hostname="localhost",
                       proc_root=str(tmp_path), logger=logger)
-    assert got == (88, 9, "x")
+    assert got == (88, 9, "x", "prog --flag arg")
