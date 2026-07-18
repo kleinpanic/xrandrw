@@ -156,6 +156,50 @@ def test_placement_chains_beyond_four(tmp_path, mock_x, logger):
     assert chained_anchor in placed, "chained anchor must be a previously-placed external connector"
 
 
+def _isolate_state(monkeypatch):
+    # Keep apply_once off the real ~/.local/share/xrandrw/state.json.
+    monkeypatch.setattr(apply_mod, "load_state", lambda: {"profiles": {}, "identity_map": {}})
+    monkeypatch.setattr(apply_mod, "save_state", lambda st: None)
+
+
+def test_identical_edid_externals_both_placed(tmp_path, mock_x, logger, monkeypatch, output_factory):
+    # WR-03: two externals with the same EDID collapse to ONE profile id; both connectors
+    # must still get a placement (previously one landed overlapped at 0x0).
+    calls, _set_outputs = mock_x
+    outs = {
+        "eDP-1": output_factory("eDP-1", connected=True),
+        "DP-1": output_factory("DP-1", connected=True, edid_sha1="deadbeef"),
+        "DP-2": output_factory("DP-2", connected=True, edid_sha1="deadbeef"),
+    }
+    monkeypatch.setattr(apply_mod, "read_xrandr", lambda logger: outs)
+    _isolate_state(monkeypatch)
+
+    apply_mod.apply_once(_env(tmp_path), logger)
+
+    assert {c for c, _r, _a in calls} == {"DP-1", "DP-2"}, "both same-EDID heads must be placed"
+    # No two placements may share the same (side, anchor) pair — that IS the overlap.
+    pairs = [(r, a) for _c, r, a in calls]
+    assert len(set(pairs)) == len(pairs)
+
+
+def test_identical_edid_externals_no_internal(tmp_path, mock_x, logger, monkeypatch, output_factory):
+    # WR-03: same collapse in the no-internal branch (DP-0 becomes primary).
+    calls, _set_outputs = mock_x
+    outs = {
+        "DP-0": output_factory("DP-0", connected=True),
+        "DP-1": output_factory("DP-1", connected=True, edid_sha1="deadbeef"),
+        "DP-2": output_factory("DP-2", connected=True, edid_sha1="deadbeef"),
+    }
+    monkeypatch.setattr(apply_mod, "read_xrandr", lambda logger: outs)
+    _isolate_state(monkeypatch)
+
+    apply_mod.apply_once(_env(tmp_path), logger)
+
+    assert {c for c, _r, _a in calls} == {"DP-1", "DP-2"}
+    pairs = [(r, a) for _c, r, a in calls]
+    assert len(set(pairs)) == len(pairs)
+
+
 def test_reread_failure_logged_not_propagated(tmp_path, mock_x, logger, caplog, monkeypatch):
     # WR-01: a transient X error on the SECOND read must not escape apply_once
     calls, set_outputs = mock_x

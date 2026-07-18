@@ -192,17 +192,20 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
 
                 # HARD-04: newest-first order -> assign_placements chains the 5th+ external off the
                 # previously-placed one instead of overlapping on a 4-side cap.
+                # WR-03: identical-EDID monitors share one pid, so a pid->connector dict drops all
+                # but one head; expand each pid to ALL its connectors and place connectors instead.
                 ordered_pids = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
-                conn_by_pid = {pid: name for name, pid in pid_by_output.items()}
-                placements = assign_placements(ordered_pids, pnl.name)
-                for pid, rel_opt, anchor_ref in placements:
-                    connector = conn_by_pid[pid]
-                    if anchor_ref == pnl.name:
-                        anchor_connector = pnl.name
+                conns_by_pid: Dict[str, List[str]] = {}
+                for name, pid in pid_by_output.items():
+                    conns_by_pid.setdefault(pid, []).append(name)
+                ordered_conns = [c for pid in ordered_pids for c in sorted(conns_by_pid[pid])]
+                placements = assign_placements(ordered_conns, pnl.name)
+                for connector, rel_opt, anchor_connector in placements:
+                    pid = pid_by_output[connector]
+                    if anchor_connector == pnl.name:
                         logev(logger, logging.INFO, "place", "external placement (stack)",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
                     else:
-                        anchor_connector = conn_by_pid[anchor_ref]
                         logev(logger, logging.INFO, "place_chain", "chained external placement",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
                     backend.auto_pos(connector, rel_opt, anchor_connector, logger)
@@ -226,17 +229,19 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                         attach_stack.append(pid)
                 st["attach_stack"] = attach_stack
 
+                # WR-03: same connector-expansion as the internal-primary branch above.
                 ordered_pids = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
-                conn_by_pid = {pid: name for name, pid in pid_by_output.items()}
-                placements = assign_placements(ordered_pids, first.name)
-                for pid, rel_opt, anchor_ref in placements:
-                    connector = conn_by_pid[pid]
-                    if anchor_ref == first.name:
-                        anchor_connector = first.name
+                conns_by_pid: Dict[str, List[str]] = {}
+                for name, pid in pid_by_output.items():
+                    conns_by_pid.setdefault(pid, []).append(name)
+                ordered_conns = [c for pid in ordered_pids for c in sorted(conns_by_pid[pid])]
+                placements = assign_placements(ordered_conns, first.name)
+                for connector, rel_opt, anchor_connector in placements:
+                    pid = pid_by_output[connector]
+                    if anchor_connector == first.name:
                         logev(logger, logging.INFO, "place", "external placement (stack)",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
                     else:
-                        anchor_connector = conn_by_pid[anchor_ref]
                         logev(logger, logging.INFO, "place_chain", "chained external placement",
                               output=connector, side=rel_opt, anchor=anchor_connector, profile=pid)
                     backend.auto_pos(connector, rel_opt, anchor_connector, logger)
