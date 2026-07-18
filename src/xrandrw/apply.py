@@ -129,8 +129,14 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
         scrub_stale(outs, logger, backend)
 
         # reread + EDID
-        outs = read_xrandr(logger)
-        read_edids(outs, logger)
+        # WR-01: a hotplug mid-apply can make this second read fail transiently; degrade
+        # like the first read instead of propagating and killing the watch loop.
+        try:
+            outs = read_xrandr(logger)
+            read_edids(outs, logger)
+        except Exception as e:
+            logev(logger, logging.ERROR, "xrandr_unavail", "xrandr read failed mid-apply", error=str(e))
+            return
 
         connected = [o for o in outs.values() if o.connected]
         if not connected:
