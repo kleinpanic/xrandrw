@@ -173,7 +173,7 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                 cur = current_or_preferred_mode(pnl)
                 width = (cur[0] if cur else 0)
                 scale = "0.5x0.5" if width >= hidpi_threshold else "1x1"
-                logev(logger, logging.INFO, "primary_set", "eDP/LVDS primary",
+                logev(logger, logging.INFO, "primary_set", "internal panel primary",
                       primary=pnl.name, mode=str(cur), scale=scale)
                 backend.primary_scale(pnl.name, scale, logger)
 
