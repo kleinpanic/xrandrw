@@ -259,11 +259,15 @@ def request(mtype: int, payload: Union[bytes, str] = b"", *,
     if isinstance(payload, str):
         payload = payload.encode()
     payload = payload + b"\x00"  # size INCLUDES the terminator (empty GET = size 1)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect(path)
     except OSError as e:
+        # Close the freshly-created fd on connect failure; otherwise it leaks
+        # until GC and emits a ResourceWarning (the socket object was created
+        # before connect, so the earlier combined-try left it dangling).
+        sock.close()
         raise DwmIpcUnavailable(f"connect {path}: {e}") from e
     try:
         sock.sendall(pack_header(mtype, len(payload)) + payload)
@@ -361,11 +365,12 @@ def subscribe(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT
     connection or send fails.
     """
     payload = b"\x00"  # size INCLUDES the terminator; concrete event payload is Phase 10
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         sock.connect(path)
     except OSError as e:
+        sock.close()  # close the fd on connect failure (no ResourceWarning leak)
         raise DwmIpcUnavailable(f"subscribe connect {path}: {e}") from e
     try:
         sock.sendall(pack_header(SUBSCRIBE, len(payload)) + payload)

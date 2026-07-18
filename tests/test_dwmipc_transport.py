@@ -96,6 +96,29 @@ def test_get_monitors_rst_on_accept_raises_dwmipc_not_oserror(sock_path):
             get_monitors(path=str(sock_path), timeout=0.5)
 
 
+def test_connect_failure_closes_socket_no_resourcewarning(tmp_path):
+    # A UNIX socket that is bound but never listen()s refuses connect with
+    # ECONNREFUSED -- exercising the connect-failure path AFTER the fd is created.
+    # If request() does not close the fd, CPython emits a ResourceWarning when the
+    # orphaned socket is finalized. Assert none is emitted.
+    import gc
+    import warnings
+
+    dead_path = str(tmp_path / "dead.sock")
+    dead = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    dead.bind(dead_path)  # bound but not listening -> connect refused
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(DwmIpcUnavailable):
+                request(GET_MONITORS, path=dead_path, timeout=0.5)
+            gc.collect()  # force finalization of any leaked socket object
+        leaked = [w for w in caught if issubclass(w.category, ResourceWarning)]
+        assert not leaked, [str(w.message) for w in leaked]
+    finally:
+        dead.close()
+
+
 # --- WM-02 capability gate --------------------------------------------------
 
 def test_available_true_on_valid_endpoint(sock_path):
