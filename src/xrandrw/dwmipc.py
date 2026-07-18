@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import socket
 import struct
@@ -69,24 +70,48 @@ class DwmIpcUnavailable(Exception):
 # user-facing config key is Phase 11/WM-07; config.py is intentionally untouched.
 
 def _env_float(name: str, default: float, minimum: float) -> float:
-    """Read a float from ``os.environ[name]``; fall back to ``default`` gracefully."""
+    """Read a float from ``os.environ[name]``; fall back to ``default`` gracefully.
+
+    Non-finite inputs (``inf`` / ``-inf`` / ``nan`` / an over-range literal like
+    ``1e400`` that ``float()`` rounds to ``inf``) are rejected: an infinite
+    timeout would silently defeat the SEC-01 hang guard and later crash
+    ``sock.settimeout(inf)`` with ``OverflowError``. Any malformed or non-finite
+    value degrades to ``default`` and logs one warning (never raises at import).
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
-        return max(minimum, float(raw))
-    except (ValueError, TypeError):
+        v = float(raw)
+        if not math.isfinite(v):
+            raise ValueError(f"non-finite value {raw!r}")
+        return max(minimum, v)
+    except (ValueError, TypeError, OverflowError):
+        logev(logger, logging.WARNING, "dwmipc_env_invalid",
+              "invalid env value, using default", name=name, value=raw, default=default)
         return default
 
 
 def _env_int(name: str, default: int, minimum: int) -> int:
-    """Read an int from ``os.environ[name]``; fall back to ``default`` gracefully."""
+    """Read an int from ``os.environ[name]``; fall back to ``default`` gracefully.
+
+    Guards the same non-finite hazard as :func:`_env_float`: ``float("1e400")``
+    /``"inf"``/``"Infinity"`` yield ``inf`` and ``int(inf)`` raises
+    ``OverflowError`` -- uncaught, this crashed ``import xrandrw.dwmipc`` (the
+    whole daemon at startup). Non-finite / malformed / over-range values degrade
+    to ``default`` with one logged warning and never raise.
+    """
     raw = os.environ.get(name)
     if raw is None:
         return default
     try:
-        return max(minimum, int(float(raw)))
-    except (ValueError, TypeError):
+        f = float(raw)
+        if not math.isfinite(f):
+            raise ValueError(f"non-finite value {raw!r}")
+        return max(minimum, int(f))
+    except (ValueError, TypeError, OverflowError):
+        logev(logger, logging.WARNING, "dwmipc_env_invalid",
+              "invalid env value, using default", name=name, value=raw, default=default)
         return default
 
 
