@@ -26,8 +26,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import socket
 import struct
-from typing import Any, Iterable, Tuple
+from typing import Any, Iterable, Tuple, Union
 
 from xrandrw.logging_utils import logev
 
@@ -187,3 +188,87 @@ def validate_monitors(obj: Any) -> list:
 def validate_client(obj: Any) -> dict:
     """Validate a GET_DWM_CLIENT reply: a client dict with the expected keys."""
     return _require_dict(obj, ("name", "tags", "geometry", "states"))
+
+
+# --- socket transport (WM-01) + capability gate (WM-02) --------------------
+#
+# Seam style mirrors RandRReader (xrandr.py): a fresh AF_UNIX connection per
+# call, shares nothing. Every socket op is timed (SEC-01: no unbounded block)
+# and every read is bounded (_recvall). The reply size cap lives in parse_header
+# and therefore runs BEFORE the body is ever read.
+
+def _recvall(sock: socket.socket, n: int) -> bytes:
+    """Read exactly ``n`` bytes from ``sock`` or raise :class:`DwmIpcUnavailable`.
+
+    Inherits the socket's timeout, so a stalled peer surfaces as
+    ``socket.timeout`` which is wrapped as :class:`DwmIpcUnavailable`. A peer that
+    closes before ``n`` bytes arrive (truncated / mid-message close) also raises.
+    """
+    buf = b""
+    while len(buf) < n:
+        try:
+            chunk = sock.recv(n - len(buf))
+        except socket.timeout as e:
+            raise DwmIpcUnavailable("socket timeout during recv") from e
+        except OSError as e:
+            raise DwmIpcUnavailable(f"socket error during recv: {e}") from e
+        if not chunk:
+            raise DwmIpcUnavailable("socket closed mid-message")
+        buf += chunk
+    return buf
+
+
+def request(mtype: int, payload: Union[bytes, str] = b"", *,
+            path: str = DEFAULT_SOCK_PATH, timeout: float = DEFAULT_TIMEOUT) -> Tuple[int, Any]:
+    """Send one DWM-IPC request and return ``(rtype, decoded_body)``.
+
+    Opens a fresh ``AF_UNIX`` ``SOCK_STREAM`` per call, sets ``timeout`` BEFORE
+    connect and keeps it for the whole exchange, sends ``pack_header + payload``
+    (payload null-terminated; ``size`` INCLUDES the terminator), reads exactly a
+    12-byte header, runs :func:`parse_header` (which enforces magic, size!=0, and
+    the ``MAX_REPLY_SIZE`` cap before the body is read), then reads exactly
+    ``size`` body bytes and hands them to :func:`decode_reply`. Any failure --
+    connect error, timeout, short read, bad framing -- raises
+    :class:`DwmIpcUnavailable`; nothing else escapes (SEC-01).
+    """
+    if isinstance(payload, str):
+        payload = payload.encode()
+    payload = payload + b"\x00"  # size INCLUDES the terminator (empty GET = size 1)
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(path)
+    except OSError as e:
+        raise DwmIpcUnavailable(f"connect {path}: {e}") from e
+    try:
+        sock.sendall(pack_header(mtype, len(payload)) + payload)
+        size, rtype = parse_header(_recvall(sock, _HDR.size))
+        body = _recvall(sock, size)
+    except socket.timeout as e:
+        raise DwmIpcUnavailable("socket timeout during request") from e
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return rtype, decode_reply(rtype, body)
+
+
+def available(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT) -> bool:
+    """WM-02 capability gate: ``True`` iff a live dwm-ipc endpoint answers. NEVER raises.
+
+    Connects, sends GET_MONITORS, and validates a non-empty monitor list. ANY
+    failure -- missing socket, ECONNREFUSED, timeout, bad magic, parse/shape
+    error -- degrades to ``False`` (feature silently OFF, existing layout
+    behavior untouched), logging one ``dwmipc_unavailable`` event. This is the
+    graceful-degrade ethos of watch.py's ``xlib_connect_fail``.
+    """
+    try:
+        # request() returns (rtype, body); validate the body ([1]), not the tuple.
+        validate_monitors(request(GET_MONITORS, path=path, timeout=timeout)[1])
+        return True
+    except Exception as e:  # noqa: BLE001 -- the gate must swallow EVERYTHING
+        logev(logger, logging.INFO, "dwmipc_unavailable",
+              "dwm-ipc endpoint unavailable; window-mgmt feature disabled",
+              path=path, reason=type(e).__name__)
+        return False
