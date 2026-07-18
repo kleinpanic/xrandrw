@@ -14,10 +14,14 @@ from __future__ import annotations
 
 import logging
 import socket
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, List, Optional
 
 from Xlib import X, display
 from Xlib.ext import res
 
+from xrandrw import dwmipc
+from xrandrw.xrandr import RandRReader, read_edids
 from xrandrw.logging_utils import logev
 
 # Module logger; the seam is the only place that touches a live Display, so its
@@ -294,3 +298,146 @@ def match_dwm_monitor_to_output(dwm_monitors, outputs,
                   "no confident single output match for dwm monitor",
                   monitor=num, geometry=mg, candidates=len(matches))
     return result
+
+
+# --------------------------------------------------------------------------
+# Persistence-ready record + capture orchestrator (WM-04)
+# --------------------------------------------------------------------------
+
+@dataclass
+class WindowRecord:
+    """Persistence-ready capture of one dwm client window.
+
+    Pure/serializable so Phase 10 can persist and restore it keyed on
+    ``(pid, starttime)``. ``geometry`` is a plain ``{x,y,width,height}`` dict;
+    ``output`` is the connector name or None; ``edid`` is an EDID sha1 or None;
+    ``cmdline`` is a str or None.
+    """
+    xid: int
+    pid: int
+    starttime: int
+    comm: str
+    cmdline: Optional[str]
+    output: Optional[str]
+    edid: Optional[str]
+    monitor_number: int
+    tags: int
+    is_floating: bool
+    is_fullscreen: bool
+    geometry: Dict[str, int]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a JSON-safe dict (round-trips through ``from_dict``)."""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WindowRecord":
+        return cls(**d)
+
+
+def _client_geometry(client: Dict[str, Any]) -> Dict[str, int]:
+    """Return the client's ``{x,y,width,height}`` from nested or flat geometry.
+
+    Real dwm returns nested ``geometry.current`` (spike 001); some replies carry
+    a flat ``geometry``. Raises ``KeyError`` on a missing geometry so the caller
+    turns a malformed client into a logged skip.
+    """
+    geom = client["geometry"]
+    if isinstance(geom, dict) and "current" in geom:
+        return geom["current"]
+    return geom
+
+
+def build_record(xid, identity, client, connector, edid,
+                 cmdline: Optional[str] = None) -> WindowRecord:
+    """Build a :class:`WindowRecord` from an identity tuple + a dwm client dict.
+
+    ``identity`` is the ``(pid, starttime, comm)`` tuple from 09-01. Reads
+    ``monitor_number``, ``tags``, ``states.is_floating``, ``states.is_fullscreen``
+    and the geometry from the validated client dict; ``output``/``edid`` come from
+    the association. Missing nested keys raise (caller catches -> skip).
+    """
+    pid, starttime, comm = identity
+    states = client["states"]
+    return WindowRecord(
+        xid=int(xid),
+        pid=int(pid),
+        starttime=int(starttime),
+        comm=comm,
+        cmdline=cmdline,
+        output=connector,
+        edid=edid,
+        monitor_number=client["monitor_number"],
+        tags=client["tags"],
+        is_floating=bool(states["is_floating"]),
+        is_fullscreen=bool(states["is_fullscreen"]),
+        geometry=_client_geometry(client),
+    )
+
+
+def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
+                    hostname: Optional[str] = None, sock_path: Optional[str] = None,
+                    logger: Optional[logging.Logger] = None) -> List[WindowRecord]:
+    """Read-only capture pipeline: enumerate + resolve + capture + associate.
+
+    Wires the whole WM-04 flow through injectable seams (production defaults
+    construct ``RandRReader()`` and ``WindowXReader()``; tests pass fakes). Per
+    decision D / WM-08 ethos: ``DwmIpcUnavailable`` from ``get_monitors`` degrades
+    to ``[]`` (feature unavailable this cycle) and any per-window failure logs +
+    skips. Performs NO state mutation and NO window control.
+    """
+    lg = logger or _LOG
+    if reader is None:
+        reader = RandRReader()
+    if xreader is None:
+        xreader = WindowXReader()
+    path = sock_path or dwmipc.DEFAULT_SOCK_PATH
+
+    # 1. Enumerate monitors; an unavailable socket degrades to an empty capture.
+    try:
+        monitors = dwmipc.get_monitors(path=path)
+    except dwmipc.DwmIpcUnavailable as e:
+        logev(lg, logging.INFO, "window_capture_unavailable",
+              "dwm ipc unavailable; capture skipped this cycle", error=str(e))
+        return []
+
+    # 2/3. Read outputs (+ EDIDs) and build the monitor->connector association.
+    outs = reader.read(lg)
+    read_edids(outs, lg)
+    mapping = match_dwm_monitor_to_output(monitors, outs, logger=lg)
+
+    records: List[WindowRecord] = []
+    for mon in monitors:
+        mnum = mon.get("num")
+        clients = (mon.get("clients") or {}).get("all") or []
+        for xid in clients:
+            try:
+                identity = resolve_pid(xid, xreader, hostname=hostname,
+                                       proc_root=proc_root, logger=lg)
+                if identity is None:
+                    logev(lg, logging.DEBUG, "window_capture_skip",
+                          "window identity unresolved; skipping", xid=xid)
+                    continue
+                try:
+                    client = dwmipc.get_dwm_client(xid, path=path)
+                except dwmipc.DwmIpcUnavailable as e:
+                    logev(lg, logging.DEBUG, "window_capture_skip",
+                          "get_dwm_client failed; skipping window",
+                          xid=xid, error=str(e))
+                    continue
+                connector = mapping.get(mnum)
+                edid = (outs[connector].edid_sha1
+                        if connector and connector in outs else None)
+                cmdline = read_proc_cmdline(identity[0], proc_root)
+                rec = build_record(xid, identity, client, connector, edid,
+                                   cmdline=cmdline)
+                records.append(rec)
+                logev(lg, logging.DEBUG, "window_capture",
+                      "captured window state", xid=xid, pid=identity[0],
+                      output=connector, monitor=mnum)
+            except Exception as e:  # one bad window never aborts the loop
+                logev(lg, logging.WARNING, "window_capture_skip",
+                      "unexpected error capturing window; skipping",
+                      xid=xid, error=str(e))
+                continue
+    return records
