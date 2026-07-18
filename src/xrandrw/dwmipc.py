@@ -272,3 +272,65 @@ def available(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT
               "dwm-ipc endpoint unavailable; window-mgmt feature disabled",
               path=path, reason=type(e).__name__)
         return False
+
+
+# --- public verbs (WM-01) --------------------------------------------------
+#
+# Thin wrappers over request() + the 08-01 validators. request() returns a
+# (rtype, body) tuple; each verb indexes [1] BEFORE validating so a validator
+# never runs on the tuple (plan-checker note 2).
+
+def get_monitors(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT) -> list:
+    """Return the validated non-empty list of monitor dicts from GET_MONITORS."""
+    return validate_monitors(request(GET_MONITORS, path=path, timeout=timeout)[1])
+
+
+def get_dwm_client(win: int, path: str = DEFAULT_SOCK_PATH, *,
+                   timeout: float = DEFAULT_TIMEOUT) -> dict:
+    """Return the validated client dict for window ``win`` from GET_DWM_CLIENT.
+
+    The payload key is ``client_window_id`` and the value MUST be a JSON int
+    (confirmed via strace in spike 001); ``win`` is coerced with ``int()``.
+    """
+    payload = json.dumps({"client_window_id": int(win)})
+    return validate_client(request(GET_DWM_CLIENT, payload, path=path, timeout=timeout)[1])
+
+
+def run_command(name: str, *args: int, path: str = DEFAULT_SOCK_PATH,
+                timeout: float = DEFAULT_TIMEOUT) -> Any:
+    """Run a dwm command ``name`` with strictly int-typed ``args``.
+
+    dwm's arg types are strictly typed for UINT/SINT -- a string arg makes dwm
+    return ``{"result":"error","reason":"Type mismatch"}`` -- so every positional
+    arg is coerced with ``int()`` before framing. Returns the decoded result.
+    """
+    payload = json.dumps({"command": str(name), "args": [int(a) for a in args]})
+    return request(RUN_COMMAND, payload, path=path, timeout=timeout)[1]
+
+
+def subscribe(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT) -> socket.socket:
+    """Establish the SUBSCRIBE transport and return the live, still-open socket.
+
+    TRANSPORT ONLY in this phase: opens a fresh AF_UNIX connection, sends a
+    SUBSCRIBE header + payload, and returns the open socket for a later phase to
+    consume. It does NOT read or loop over EVENT messages -- the EVENT-stream
+    consumption loop and the focus-then-act control sequencing are deferred to
+    the Phase 10 relocation lifecycle. Raises :class:`DwmIpcUnavailable` if the
+    connection or send fails.
+    """
+    payload = b"\x00"  # size INCLUDES the terminator; concrete event payload is Phase 10
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect(path)
+    except OSError as e:
+        raise DwmIpcUnavailable(f"subscribe connect {path}: {e}") from e
+    try:
+        sock.sendall(pack_header(SUBSCRIBE, len(payload)) + payload)
+    except OSError as e:
+        try:
+            sock.close()
+        except OSError:
+            pass
+        raise DwmIpcUnavailable(f"subscribe send: {e}") from e
+    return sock
