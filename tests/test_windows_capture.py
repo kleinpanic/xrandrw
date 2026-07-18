@@ -272,6 +272,26 @@ def test_capture_malformed_clients_shape_skips_monitor_not_capture(tmp_path, mon
     assert len(skips) == 2, "both malformed monitors must log a graceful skip"
 
 
+def test_capture_x_read_raises_returns_empty(tmp_path, monkeypatch, logger, caplog):
+    # BLOCKER 2 (WR-01): a reader whose read() raises on a hotplug/X-restart race
+    # must degrade to [] (like dwmipc-unavailable), never propagate out.
+    mons = [_mon(0, 0, 0, 1920, 1080, clients=[0x11])]
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    def boom(logger=None):
+        raise ConnectionError("X server went away")
+
+    reader = SimpleNamespace(read=boom)
+    with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+        recs = capture_windows(reader=reader, xreader=_fake_xreader(1234),
+                               proc_root=str(tmp_path), hostname="localhost",
+                               sock_path="/x", logger=logger)
+    assert recs == []
+    assert any(getattr(r, "event", None) == "window_capture_unavailable"
+               for r in caplog.records)
+
+
 def test_capture_get_dwm_client_unavailable_skips_one(tmp_path, monkeypatch, logger):
     _make_proc(tmp_path, 1234)
     outs = {

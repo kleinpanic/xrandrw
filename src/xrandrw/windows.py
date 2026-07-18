@@ -402,8 +402,16 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
         return []
 
     # 2/3. Read outputs (+ EDIDs) and build the monitor->connector association.
-    outs = reader.read(lg)
-    read_edids(outs, lg)
+    # WR-01: a hotplug / X-restart race can make this live read raise transiently;
+    # degrade like the dwmipc-unavailable path (log + return []) instead of
+    # letting it propagate out of capture_windows (mirrors apply.py's guarded read).
+    try:
+        outs = reader.read(lg)
+        read_edids(outs, lg)
+    except Exception as e:
+        logev(lg, logging.INFO, "window_capture_unavailable",
+              "x read failed mid-capture; capture skipped this cycle", error=str(e))
+        return []
     mapping = match_dwm_monitor_to_output(monitors, outs, logger=lg)
 
     records: List[WindowRecord] = []
