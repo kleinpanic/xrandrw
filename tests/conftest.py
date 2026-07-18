@@ -6,6 +6,15 @@ import pytest
 from xrandrw.xrandr import Output
 
 
+@pytest.fixture(autouse=True)
+def isolate_state(tmp_path, monkeypatch):
+    # Hard guarantee: no test may ever read or write the real user state at
+    # ~/.local/share/xrandrw/. state_dir()/state_path() honor XDG_DATA_HOME, so
+    # redirecting it per-test sandboxes all state I/O — even for tests that call
+    # apply_once/set_pref without patching load_state/save_state directly.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+
 @pytest.fixture
 def output_factory() -> Callable[..., Output]:
     def make(name, connected=True, primary=False, current_mode=None, modes=None, edid_sha1=None):

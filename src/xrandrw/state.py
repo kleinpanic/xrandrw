@@ -13,8 +13,14 @@ from typing import Dict, List, Optional
 from xrandrw.xrandr import Output
 from xrandrw.logging_utils import logev
 
-STATE_DIR = Path.home() / ".local/share/xrandrw"
-STATE_PATH = STATE_DIR / "state.json"
+def state_dir() -> Path:
+    # XDG Base Directory spec: honor XDG_DATA_HOME, else ~/.local/share. Resolved at
+    # call time (not import) so the env can be set per-process (and per-test).
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local/share")
+    return Path(base) / "xrandrw"
+
+def state_path() -> Path:
+    return state_dir() / "state.json"
 
 def _now() -> float:
     return time.time()
@@ -23,9 +29,10 @@ def _new_profile_id(seed: str) -> str:
     return hashlib.sha1(seed.encode()).hexdigest()[:16]
 
 def load_state() -> Dict[str, dict]:
+    sp = state_path()
     try:
-        if STATE_PATH.is_file():
-            return json.loads(STATE_PATH.read_text())
+        if sp.is_file():
+            return json.loads(sp.read_text())
     except Exception:
         pass
     return {"profiles": {}, "identity_map": {}}
@@ -47,7 +54,9 @@ def _atomic_write_json(path: Path, obj) -> None:
             pass
         raise
 
-def save_state(st: Dict[str, dict], path: Path = STATE_PATH) -> None:
+def save_state(st: Dict[str, dict], path: Optional[Path] = None) -> None:
+    if path is None:
+        path = state_path()
     try:
         _atomic_write_json(path, st)
     except Exception as e:
