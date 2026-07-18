@@ -1,7 +1,9 @@
 # codework/Python/xrandrw/systemd/xrandrw.service
 [Unit]
 Description=xrandrw: automatic X11 display hotplug policy (dwm)
-Wants=dwm-session.target
+# Session helper: enabling this links it under dwm-session.target.wants/ and it
+# stops with the session. Generic (non-dwm) setups can retarget both lines to
+# graphical-session.target.
 After=dwm-session.target
 PartOf=dwm-session.target
 StartLimitIntervalSec=0
