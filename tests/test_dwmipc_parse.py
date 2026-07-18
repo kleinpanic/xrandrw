@@ -6,6 +6,7 @@ truncation, JSON shape) entirely without sockets or a real dwm/X, mirroring the
 """
 from __future__ import annotations
 
+import json
 import struct
 
 import pytest
@@ -13,10 +14,14 @@ import pytest
 from xrandrw import dwmipc
 from xrandrw.dwmipc import (
     DwmIpcUnavailable,
+    GET_DWM_CLIENT,
     GET_MONITORS,
     MAGIC,
+    decode_reply,
     pack_header,
     parse_header,
+    validate_client,
+    validate_monitors,
 )
 
 
@@ -101,3 +106,87 @@ def test_env_int_reads_override(monkeypatch):
 def test_env_int_malformed_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("DWMIPC_MAX_REPLY", "garbage")
     assert dwmipc._env_int("DWMIPC_MAX_REPLY", 4096, 1) == 4096
+
+
+# --- decode_reply: null-strip + JSON decode (SEC-01) -----------------------
+
+_VALID_MONITORS = [{"num": 0, "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080}}]
+_VALID_CLIENT = {
+    "name": "term",
+    "tags": 1,
+    "geometry": {"x": 0, "y": 0, "width": 800, "height": 600},
+    "states": {"is_floating": False},
+}
+
+
+def _framed(obj) -> bytes:
+    # dwm replies are null-terminated C strings; size INCLUDES the terminator.
+    return json.dumps(obj).encode() + b"\x00"
+
+
+def test_decode_reply_strips_null_and_json_decodes():
+    body = _framed(_VALID_MONITORS)
+    assert body.endswith(b"\x00")
+    assert decode_reply(GET_MONITORS, body) == _VALID_MONITORS
+
+
+def test_decode_reply_empty_body_is_none():
+    assert decode_reply(GET_MONITORS, b"") is None
+
+
+def test_decode_reply_terminator_only_body_is_none():
+    assert decode_reply(GET_MONITORS, b"\x00") is None
+
+
+def test_decode_reply_non_json_raises_dwmipc():
+    with pytest.raises(DwmIpcUnavailable):
+        decode_reply(GET_MONITORS, b"\xff\xfe not json at all \x00")
+
+
+def test_decode_reply_does_not_leak_jsondecodeerror():
+    try:
+        decode_reply(GET_MONITORS, b"{not: valid json,,,}\x00")
+    except DwmIpcUnavailable:
+        pass
+    except json.JSONDecodeError:
+        pytest.fail("json.JSONDecodeError leaked from decode_reply")
+
+
+# --- shape validators (SEC-01) ---------------------------------------------
+
+def test_validate_monitors_accepts_valid_list():
+    assert validate_monitors(_VALID_MONITORS) == _VALID_MONITORS
+
+
+def test_validate_monitors_rejects_empty_list():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_monitors([])
+
+
+def test_validate_monitors_rejects_bare_int():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_monitors(5)
+
+
+def test_validate_monitors_rejects_list_of_non_dicts():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_monitors([1, 2, 3])
+
+
+def test_validate_monitors_rejects_missing_keys():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_monitors([{"num": 0}])  # missing monitor_geometry
+
+
+def test_validate_client_accepts_valid_dict():
+    assert validate_client(_VALID_CLIENT) == _VALID_CLIENT
+
+
+def test_validate_client_rejects_list_where_dict_required():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_client([_VALID_CLIENT])
+
+
+def test_validate_client_rejects_missing_keys():
+    with pytest.raises(DwmIpcUnavailable):
+        validate_client({"name": "x", "tags": 1})  # missing geometry/states
