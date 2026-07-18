@@ -23,6 +23,7 @@ dependencies = ["python-xlib>=0.31"]
 journald = ["systemd-python"]
 wallpaper = ["Pillow"]
 test = ["pytest"]
+dev = ["pytest", "ruff==0.15.*", "vulture>=2.11", "build"]
 
 [project.scripts]
 xrandrw = "xrandrw.cli:main"
@@ -36,6 +37,13 @@ where = ["src"]
 [tool.ruff]
 line-length = 110
 target-version = "py39"
+
+[tool.vulture]
+# Dead-code gate. `frame` is the signal-handler's required second arg (signal API
+# contract), structurally unused — the only legitimate false positive.
+min_confidence = 80
+paths = ["src"]
+ignore_names = ["frame"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

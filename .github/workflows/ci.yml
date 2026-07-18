@@ -20,10 +20,26 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Install Ruff
-        run: pip install "ruff==0.15.*"
-      - name: Ruff check
-        run: ruff check .
+      - name: Ruff (lint)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install "ruff==0.15.*"
+          ruff check .
+
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Vulture (dead-code, config in pyproject [tool.vulture])
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install "vulture>=2.11"
+          vulture
 
   test:
     runs-on: ubuntu-latest
@@ -36,11 +52,11 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Install package (editable)
-        run: pip install -e .
-      - name: Import-safety smoke test
-        run: python -c "import xrandrw.cli"
-      - name: Build sdist + wheel
+      - name: Test suite + build (in venv)
         run: |
-          pip install build
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e ".[test]" build
+          python -c "import xrandrw.cli"   # import-safety smoke
+          pytest -q
           python -m build

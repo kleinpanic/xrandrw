@@ -18,10 +18,6 @@ from xrandrw.touch import remap_touch
 def xrandr_output_off(connector: str, logger: logging.Logger):
     run(["xrandr", "--output", connector, "--off"], logger=logger)
 
-def xrandr_reset(connector: str, logger: logging.Logger):
-    # Keep for explicit callers if ever needed; no longer used pre-apply for connected outputs
-    run(["xrandr", "--output", connector, "--panning", "0x0"], logger=logger)
-
 def xrandr_auto_primary_scale(connector: str, scale: str, logger: logging.Logger):
     run(["xrandr", "--output", connector, "--auto", "--scale", scale, "--panning", "0x0", "--primary"], logger=logger)
 

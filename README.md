@@ -14,22 +14,26 @@ Pure Python standard library (optional `systemd-python` for journald logging).
 
 ## Install
 
-End-user (isolated, lands the `xrandrw` console-script at `~/.local/bin`):
+End-user (isolated, lands the `xrandrw` console-script at `~/.local/bin` — never
+touches system Python):
 
 ```bash
-pipx install .
-```
-
-Development (editable):
-
-```bash
-pip install -e .
+pipx install xrandrw            # from PyPI
+# or, from a checkout: pipx install .
 ```
 
 Optional journald logging extra:
 
 ```bash
-pip install ".[journald]"
+pipx install "xrandrw[journald]"
+```
+
+Development — always in a virtualenv, never a bare/root `pip`:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 ```
 
 ## Usage
