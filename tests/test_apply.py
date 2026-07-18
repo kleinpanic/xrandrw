@@ -153,7 +153,7 @@ def test_profile_subset_does_not_early_return(tmp_path, mock_x, logger, monkeypa
 
     apply_mod.apply_once(env, logger)
 
-    # Generic path ran: DSI-1 primary (no internal), HDMI-1 placed relative to it.
+    # Generic path ran: DSI-1 primary (internal panel), HDMI-1 placed relative to it.
     assert calls == [("HDMI-1", "right-of", "DSI-1")]
     # The profile argv (with --mode 800x480) was never assembled.
     assert all("800x480" not in argv for argv in captured)

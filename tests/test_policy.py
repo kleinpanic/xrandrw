@@ -1,6 +1,18 @@
 from __future__ import annotations
 
-from xrandrw.policy import SIDES, assign_placements
+from xrandrw.policy import SIDES, assign_placements, is_internal_lcd
+
+
+def test_internal_lcd_recognizes_all_panel_types():
+    # Internal panels across systems must always win primary over externals:
+    # eDP (laptops), LVDS (old laptops), DSI (Pi/embedded), DPI (GPIO panels).
+    for name in ("eDP-1", "eDP1", "LVDS-1", "LVDS1", "DSI-1", "DSI1", "DPI-1"):
+        assert is_internal_lcd(name), name
+
+
+def test_external_connectors_are_not_internal():
+    for name in ("HDMI-1", "HDMI-A-1", "DP-1", "DisplayPort-0", "VGA-1", "DVI-D-1"):
+        assert not is_internal_lcd(name), name
 
 
 def test_assign_placements_single():

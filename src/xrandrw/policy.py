@@ -7,7 +7,10 @@ from xrandrw.state import get_profile
 SIDES = ("right-of", "left-of", "above", "below")
 
 def is_internal_lcd(name: str) -> bool:
-    return name.startswith("eDP") or name.startswith("LVDS")
+    # Internal-panel connector prefixes across systems: eDP (modern laptops),
+    # LVDS (older laptops), DSI (Raspberry Pi ribbon panels / embedded), DPI
+    # (GPIO parallel panels). These must always win primary over externals.
+    return name.startswith(("eDP", "LVDS", "DSI", "DPI"))
 
 def current_or_preferred_mode(o: Output) -> Optional[Tuple[int, int]]:
     for w, h, rate, flags in o.modes:
