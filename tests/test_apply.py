@@ -105,6 +105,7 @@ def test_lock_acquire_order(tmp_path, mock_x, logger, monkeypatch):
         return real_open(path, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", spy_open)
+    _isolate_state(monkeypatch)
 
     apply_mod.apply_once(env, logger)
 
@@ -158,11 +159,12 @@ def test_profile_subset_does_not_early_return(tmp_path, mock_x, logger, monkeypa
     assert all("800x480" not in argv for argv in captured)
 
 
-def test_placement_chains_beyond_four(tmp_path, mock_x, logger):
+def test_placement_chains_beyond_four(tmp_path, mock_x, logger, monkeypatch):
     calls, set_outputs = mock_x
     # DP-1 becomes primary (no internal); DP-2..DP-6 are 5 externals.
     set_outputs(["DP-1", "DP-2", "DP-3", "DP-4", "DP-5", "DP-6"])
     env = _env(tmp_path)
+    _isolate_state(monkeypatch)
 
     apply_mod.apply_once(env, logger)
 
