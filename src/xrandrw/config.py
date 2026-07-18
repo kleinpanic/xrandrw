@@ -19,6 +19,7 @@ ENV_DEFAULTS = {
     "LOG_FILE": "",                        # optional file path (JSON lines)
     "LOCKFILE": "/tmp/xrandrw.lock",
     "PREF_DEFAULT_SIDE": "right-of",       # default side for unknown display
+    "TOUCH_MAP": "",                       # ""=off | "devname:OUTPUT;..." remap touch after each apply
     "EXCESS_WINDOW_SEC": "20",             # burst window
     "EXCESS_THRESHOLD": "4",               # applies within window -> warn+backoff
 }

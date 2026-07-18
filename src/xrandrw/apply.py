@@ -13,6 +13,7 @@ from xrandrw.state import load_state, save_state, ensure_profile, get_profile, _
 from xrandrw.policy import is_internal_lcd, current_or_preferred_mode, assign_placements
 from xrandrw.profiles import parse_all_profiles, match_profile, build_xrandr_argv
 from xrandrw.wallpaper import apply_wallpaper
+from xrandrw.touch import remap_touch
 
 def xrandr_output_off(connector: str, logger: logging.Logger):
     run(["xrandr", "--output", connector, "--off"], logger=logger)
@@ -155,6 +156,7 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                   profile=match.name, connectors=sorted(match.connectors))
             run(build_xrandr_argv(match), logger=logger)
             reapply_wallpaper(env, logger)
+            remap_touch(env, {o.name for o in connected}, logger)
             logev(logger, logging.INFO, "apply_done", "apply: done (profile)", source=event_source)
             return
 
@@ -254,6 +256,7 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
             save_state(st)
 
         reapply_wallpaper(env, logger)
+        remap_touch(env, {o.name for o in connected}, logger)
         logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
     finally:
         os.close(fd)  # closing the fd releases the apply-lock

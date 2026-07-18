@@ -23,6 +23,17 @@ LOG_LEVEL=notice
 # Default side for new/unknown monitors: right-of|left-of|above|below
 PREF_DEFAULT_SIDE=right-of
 
+# Touch remap: keep a touchscreen's coordinates aligned to its panel after every
+# layout change. `xinput map-to-output` bakes in the output's position at call time,
+# so a one-shot login-time remap goes stale whenever a panel moves (plug/unplug/
+# side-swap). xrandrw re-applies this after each apply. Empty = off (no xinput needed).
+# Format: "<device-name-substring>:<OUTPUT>[;<substring>:<OUTPUT>...]" (case-insensitive).
+#   Raspberry Pi DSI touchscreen:   TOUCH_MAP="ft5x06:DSI-1"
+#   Touch laptop (eDP internal):    TOUCH_MAP="ELAN Touchscreen:eDP-1"
+#   Goodix / Wacom laptop panels:   TOUCH_MAP="Goodix:eDP-1"  /  "Wacom:eDP-1"
+#   Multiple devices:               TOUCH_MAP="ft5x06:DSI-1;Wacom:HDMI-1"
+# TOUCH_MAP=
+
 # Wallpaper backend selector. Empty = auto-detect; or force one of:
 #   feh | fehbg | xwallpaper | native
 # (native is the pure-Python Xlib+Pillow fallback; it needs the 'wallpaper'
