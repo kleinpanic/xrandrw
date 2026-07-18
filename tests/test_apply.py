@@ -154,3 +154,46 @@ def test_placement_chains_beyond_four(tmp_path, mock_x, logger):
     chained_connector, chained_anchor = chained[0]
     assert chained_anchor != "DP-1"
     assert chained_anchor in placed, "chained anchor must be a previously-placed external connector"
+
+
+def test_reread_failure_logged_not_propagated(tmp_path, mock_x, logger, caplog, monkeypatch):
+    # WR-01: a transient X error on the SECOND read must not escape apply_once
+    calls, set_outputs = mock_x
+    outs = set_outputs(["DP-1", "DP-2"])
+    env = _env(tmp_path)
+
+    reads = {"n": 0}
+
+    def flaky_read(logger):
+        reads["n"] += 1
+        if reads["n"] >= 2:
+            raise RuntimeError("transient X error")
+        return outs
+    monkeypatch.setattr(apply_mod, "read_xrandr", flaky_read)
+
+    with caplog.at_level(logging.DEBUG, logger="xrandrw.test_apply"):
+        apply_mod.apply_once(env, logger)  # must return, not raise
+
+    assert reads["n"] == 2
+    assert calls == [], "no placement may run after a failed reread"
+    errs = [r for r in caplog.records if getattr(r, "event", None) == "xrandr_unavail"]
+    assert errs and errs[0].levelno == logging.ERROR
+
+
+def test_scrub_stale_powers_off_lingering_head(output_factory, logger):
+    # Disconnected-but-lit head (the reported bug's state) must get an output_off
+    outs = {
+        "DSI-1": output_factory("DSI-1", connected=True, current_mode=(800, 480)),
+        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900)),
+        "HDMI-2": output_factory("HDMI-2", connected=False, current_mode=None),
+    }
+    offs = []
+
+    class FakeBackend:
+        def output_off(self, connector, logger):
+            offs.append(connector)
+
+    apply_mod.scrub_stale(outs, logger, FakeBackend())
+
+    assert sorted(offs) == ["HDMI-1", "HDMI-2"]
+    assert "DSI-1" not in offs
