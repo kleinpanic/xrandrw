@@ -252,7 +252,7 @@ def _preflight_socket(path: str) -> None:
         raise DwmIpcUnavailable(f"{path} owned by uid {st.st_uid}, not {os.getuid()}")
 
 
-def _recvall(sock: socket.socket, n: int, deadline: float = None) -> bytes:
+def _recvall(sock: socket.socket, n: int, deadline: float | None = None) -> bytes:
     """Read exactly ``n`` bytes from ``sock`` or raise :class:`DwmIpcUnavailable`.
 
     A per-``recv`` timeout alone is NOT enough: a peer trickling one byte just
