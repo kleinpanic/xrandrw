@@ -88,14 +88,15 @@ def parse_all_profiles(env: Dict[str, str]) -> List[Profile]:
 
 # ---------------- match ----------------
 
-# Subset match: a profile fires when its connectors are all connected (preserves the
-# old Pi4 `"DSI-1" in names and "HDMI-1" in names` trigger). Tie-break: largest connector
-# set wins (most specific); on equal size the alphabetically-first profile name wins.
+# Exact match: a profile fires only when its connector set EQUALS the connected set.
+# Subset matching (WR-05) let a {DSI-1} profile fire with {DSI-1, HDMI-1} connected and
+# apply_once early-returned with HDMI-1 never configured. Tie-break on identical sets:
+# alphabetically-first profile name wins.
 def match_profile(connected: frozenset, profiles: List[Profile]) -> Optional[Profile]:
-    candidates = [p for p in profiles if p.connectors <= connected]
+    candidates = [p for p in profiles if p.connectors == connected]
     if not candidates:
         return None
-    return sorted(candidates, key=lambda p: (-len(p.connectors), p.name))[0]
+    return sorted(candidates, key=lambda p: p.name)[0]
 
 # ---------------- argv ----------------
 

@@ -138,6 +138,26 @@ def test_profile_override(tmp_path, mock_x, logger, layout_pi4, frozen_pi4_argv,
     assert calls == []
 
 
+def test_profile_subset_does_not_early_return(tmp_path, mock_x, logger, monkeypatch):
+    # WR-05: a {DSI-1} profile must NOT fire when {DSI-1, HDMI-1} is connected — the
+    # profile early-return would leave HDMI-1 unconfigured. Must fall through to placement.
+    calls, set_outputs = mock_x
+    set_outputs(["DSI-1", "HDMI-1"])
+    env = _env(tmp_path)
+    env["LAYOUT_SOLO"] = "DSI-1:800x480:primary:0x0"
+
+    captured = []
+    monkeypatch.setattr(apply_mod, "run", lambda argv, **k: captured.append(argv))
+    _isolate_state(monkeypatch)
+
+    apply_mod.apply_once(env, logger)
+
+    # Generic path ran: DSI-1 primary (no internal), HDMI-1 placed relative to it.
+    assert calls == [("HDMI-1", "right-of", "DSI-1")]
+    # The profile argv (with --mode 800x480) was never assembled.
+    assert all("800x480" not in argv for argv in captured)
+
+
 def test_placement_chains_beyond_four(tmp_path, mock_x, logger):
     calls, set_outputs = mock_x
     # DP-1 becomes primary (no internal); DP-2..DP-6 are 5 externals.
