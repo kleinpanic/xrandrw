@@ -337,6 +337,66 @@ def test_capture_x_read_raises_returns_empty(tmp_path, monkeypatch, logger, capl
                for r in caplog.records)
 
 
+def test_capture_associates_output_by_client_monitor_not_stale_mnum(tmp_path, monkeypatch, logger):
+    # WARNING 5: a window enumerated under mnum=0 (DP-1) whose get_dwm_client
+    # reports monitor_number=1 (it moved between round-trips) must associate to
+    # DP-1's neighbour DP-2 -- the client's OWN monitor -- never the stale mnum.
+    _make_proc(tmp_path, 1234)
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="edidA"),
+        "DP-2": _out("DP-2", mode=(1920, 1080), position=(1920, 0), edid="edidB"),
+    }
+    mons = [
+        _mon(0, 0, 0, 1920, 1080, clients=[0x11]),
+        _mon(1, 1920, 0, 1920, 1080, clients=[]),
+    ]
+
+    def client_for(xid, path=None, **kw):
+        # enumerated under monitor 0, but the client now lives on monitor 1.
+        return {"name": "app", "tags": 1, "monitor_number": 1,
+                "geometry": {"current": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "states": {"is_floating": False, "is_fullscreen": False}}
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    recs = capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                           proc_root=str(tmp_path), hostname="localhost",
+                           sock_path="/x", logger=logger)
+    assert len(recs) == 1
+    # output/edid follow the client's OWN monitor_number (1 -> DP-2), not mnum 0.
+    assert recs[0].monitor_number == 1
+    assert recs[0].output == "DP-2" and recs[0].edid == "edidB"
+
+
+def test_capture_client_monitor_not_in_mapping_leaves_output_none(tmp_path, monkeypatch, logger, caplog):
+    # WARNING 5: when the client's monitor_number isn't a known mapping key,
+    # leave output/edid None + log rather than mis-associate to the stale mnum.
+    _make_proc(tmp_path, 1234)
+    outs = {"DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="edidA")}
+    mons = [_mon(0, 0, 0, 1920, 1080, clients=[0x11])]
+
+    def client_for(xid, path=None, **kw):
+        return {"name": "app", "tags": 1, "monitor_number": 7,  # unknown monitor
+                "geometry": {"current": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "states": {"is_floating": False, "is_fullscreen": False}}
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw"):
+        recs = capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                               proc_root=str(tmp_path), hostname="localhost",
+                               sock_path="/x", logger=logger)
+    assert len(recs) == 1
+    assert recs[0].monitor_number == 7
+    assert recs[0].output is None and recs[0].edid is None
+    assert any(getattr(r, "event", None) == "window_monitor_unmapped"
+               for r in caplog.records)
+
+
 def test_capture_get_dwm_client_unavailable_skips_one(tmp_path, monkeypatch, logger):
     _make_proc(tmp_path, 1234)
     outs = {

@@ -476,14 +476,28 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
                           "get_dwm_client failed; skipping window",
                           xid=xid, error=str(e))
                     continue
-                connector = mapping.get(mnum)
+                # WARNING 5: derive output/edid from the SAME monitor_number the
+                # record stores (the post-get_dwm_client value), not the earlier
+                # enumerating ``mnum`` -- a window that moved between the
+                # GET_MONITORS and GET_DWM_CLIENT round-trips would otherwise be
+                # mis-associated to a stale connector. If that monitor isn't in the
+                # mapping, leave output/edid None + log rather than guess.
+                client_mnum = client["monitor_number"]
+                if client_mnum in mapping:
+                    connector = mapping.get(client_mnum)
+                else:
+                    connector = None
+                    logev(lg, logging.INFO, "window_monitor_unmapped",
+                          "client monitor_number not in output mapping; "
+                          "leaving output/edid unset",
+                          xid=xid, monitor=client_mnum)
                 edid = (outs[connector].edid_sha1
                         if connector and connector in outs else None)
                 rec = build_record(xid, identity, client, connector, edid)
                 records.append(rec)
                 logev(lg, logging.DEBUG, "window_capture",
                       "captured window state", xid=xid, pid=identity[0],
-                      output=connector, monitor=mnum)
+                      output=connector, monitor=client_mnum)
             except Exception as e:  # one bad window never aborts the loop
                 logev(lg, logging.WARNING, "window_capture_skip",
                       "unexpected error capturing window; skipping",

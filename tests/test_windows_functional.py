@@ -63,6 +63,19 @@ _CLIENT = {
 }
 
 
+def _client_for_xid(xid):
+    """Per-window client whose monitor_number matches the monitor it lives on.
+
+    WARNING-5 contract: output/EDID association keys on the client's OWN
+    monitor_number, so the fixture must report the true owning monitor
+    (0x1400001 -> monitor 0 / DP-1, 0x1400002 -> monitor 1 / DP-2).
+    """
+    mnum = 0 if xid == 0x1400001 else 1
+    c = dict(_CLIENT)
+    c["monitor_number"] = mnum
+    return c
+
+
 def _outputs():
     return {
         "DP-1": Output(name="DP-1", connected=True, current_mode=(1920, 1080),
@@ -101,7 +114,7 @@ def test_functional_happy_path(sock_path, tmp_path, monkeypatch, logger):
     # read_edids would open a live Display; edids are already set on the outputs.
     monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
 
-    with FakeDwmServer(sock_path, mode="auto", monitors=_MONITORS, client=_CLIENT):
+    with FakeDwmServer(sock_path, mode="auto", monitors=_MONITORS, client=_client_for_xid):
         recs = capture_windows(
             reader=_fake_randr(_outputs()),
             xreader=_fake_xreader(lambda xid: HOST),
@@ -134,7 +147,7 @@ def test_functional_nonlocal_skip(sock_path, tmp_path, monkeypatch, logger, capl
     def machine_for(xid):
         return "remote.example.net" if xid == 0x1400001 else HOST
 
-    with FakeDwmServer(sock_path, mode="auto", monitors=_MONITORS, client=_CLIENT):
+    with FakeDwmServer(sock_path, mode="auto", monitors=_MONITORS, client=_client_for_xid):
         with caplog.at_level(logging.DEBUG, logger="xrandrw"):
             recs = capture_windows(
                 reader=_fake_randr(_outputs()),

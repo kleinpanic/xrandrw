@@ -177,11 +177,29 @@ class FakeDwmServer:
         self.received.append((rtype, size, payload))
         return rtype, payload
 
-    def _valid_reply(self, rtype: int) -> bytes:
+    def _resolve_client(self, payload: bytes):
+        """Return the client dict for a GET_DWM_CLIENT request.
+
+        ``self.client`` may be a plain dict (returned for every window) or a
+        callable ``xid -> dict`` so a test can vary the reply per window (e.g. a
+        client whose ``monitor_number`` matches the monitor it lives on).
+        """
+        if not callable(self.client):
+            return self.client
+        xid = None
+        try:
+            # The request payload is NUL-terminated (size includes the terminator);
+            # strip it before decoding or json.loads rejects the trailing \x00.
+            xid = json.loads(payload.rstrip(b"\x00").decode()).get("client_window_id")
+        except (ValueError, AttributeError):
+            xid = None
+        return self.client(xid)
+
+    def _valid_reply(self, rtype: int, payload: bytes = b"") -> bytes:
         if self.mode == "monitors" or (self.mode == "auto" and rtype == GET_MONITORS):
             return _frame(GET_MONITORS, self.monitors)
         if self.mode == "client" or (self.mode == "auto" and rtype == GET_DWM_CLIENT):
-            return _frame(GET_DWM_CLIENT, self.client)
+            return _frame(GET_DWM_CLIENT, self._resolve_client(payload))
         if self.mode == "run_command" or (self.mode == "auto" and rtype == RUN_COMMAND):
             return _frame(RUN_COMMAND, self.run_result)
         if self.mode == "subscribe" or (self.mode == "auto" and rtype == SUBSCRIBE):
@@ -214,12 +232,13 @@ class FakeDwmServer:
 
         req = self._read_request(conn)
         rtype = req[0] if req is not None else GET_MONITORS
+        payload = req[1] if req is not None else b""
 
         if mode == "slow_trickle":
             # Drip a well-formed reply one byte at a time with a gap SHORTER than
             # the client's per-recv timeout, so no single recv() ever trips
             # socket.timeout -- only a TOTAL wall-clock deadline can bound this.
-            reply = self._valid_reply(rtype)
+            reply = self._valid_reply(rtype, payload)
             for i in range(len(reply)):
                 if self._stop.is_set():
                     return
@@ -259,7 +278,7 @@ class FakeDwmServer:
             return
 
         # Valid modes.
-        conn.sendall(self._valid_reply(rtype))
+        conn.sendall(self._valid_reply(rtype, payload))
 
 
 def _self_smoke() -> None:
