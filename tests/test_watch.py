@@ -141,6 +141,34 @@ def test_slow_poll_reapplies_only_on_change(monkeypatch, logger):
     assert applies == ["slow_poll"], "slow-poll applies once, only when topology changed"
 
 
+def test_no_double_apply_from_own_mutations(monkeypatch, logger):
+    # Phantom guard: the apply's own xrandr commands emit RandR events. If the loop
+    # returned the PRE-apply hash it would see the settled post-apply topology as a
+    # fresh change and apply a second, redundant time. It must absorb its own change.
+    fake = FakeDisplay()
+    topo = {"hash": "h0"}
+
+    def _plug():
+        fake.pending = 3
+        topo["hash"] = "h1"          # real hotplug -> the (single) legitimate apply
+
+    def _self_events():
+        fake.pending = 3             # daemon's own events; topology already settled at h2
+
+    script = [("event", _plug), ("event", _self_events), ("timeout", watch.stop_evt.set)]
+    applies = _drive(monkeypatch, fake, script, topo)
+
+    # Override apply_once so it mutates the topology, as a real apply does.
+    def _apply(env, logger, event_source):
+        applies.append(event_source)
+        topo["hash"] = "h2"
+    monkeypatch.setattr(watch, "apply_once", _apply)
+
+    watch.watch_loop(_env(), logger)
+
+    assert applies == ["randr_event"], "must not re-apply on its own post-apply events"
+
+
 def test_randr_below_1_5_degrades_to_slow_poll(monkeypatch, logger):
     fake = FakeDisplay(version=(1, 4))
     topo = {"hash": "h0"}

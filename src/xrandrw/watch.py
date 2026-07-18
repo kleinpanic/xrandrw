@@ -50,7 +50,9 @@ def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
     src = "randr_event" if got_event else "slow_poll"
     logev(logger, logging.INFO, "watch_apply", "apply on topology change", source=src)
     apply_once(env, logger, event_source=src)
-    return verify
+    # Absorb our own mutations: the apply's xrandr commands emit RandR events; re-read the
+    # settled topology so the loop doesn't chase its own change into a redundant 2nd apply.
+    return topology_hash(logger)
 
 def watch_loop(env: Dict[str, str], logger: logging.Logger):
     slow_poll = int(env["POLL_INTERVAL"])  # D-06: safety-net timeout, not a tight loop
