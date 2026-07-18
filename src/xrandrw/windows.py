@@ -150,3 +150,109 @@ def _safe_close(d) -> None:
             d.close()
         except Exception:
             pass
+
+
+# --------------------------------------------------------------------------
+# Pure /proc parsing helpers (X-free, socket-free; injectable proc_root)
+# --------------------------------------------------------------------------
+
+def parse_starttime_from_stat(stat_text: str) -> int:
+    """Return field 22 (starttime) of a ``/proc/<pid>/stat`` line.
+
+    The line is ``pid (comm) state ppid ...`` where ``comm`` may itself contain
+    spaces and parentheses, so the split is anchored on the LAST ``')'``. In the
+    whitespace-split remainder the state char is element 0, so proc(5) field 22
+    (starttime) is element 19. Raises ``ValueError`` on a structurally
+    unparseable line so the caller's try/except turns it into a skip.
+    """
+    close = stat_text.rindex(")")  # ValueError if no ')' present
+    rest = stat_text[close + 1:].split()
+    if len(rest) < 20:
+        raise ValueError("stat line too short to contain starttime (field 22)")
+    return int(rest[19])
+
+
+def read_proc_comm(pid: int, proc_root: str = "/proc") -> "str | None":
+    """Read ``<proc_root>/<pid>/comm`` (trailing newline stripped) or ``None``."""
+    try:
+        with open(f"{proc_root}/{pid}/comm", "r") as f:
+            return f.read().rstrip("\n")
+    except OSError:
+        return None
+
+
+def read_proc_cmdline(pid: int, proc_root: str = "/proc") -> "str | None":
+    """Read ``<proc_root>/<pid>/cmdline`` with NUL separators turned into spaces.
+
+    ``/proc/<pid>/cmdline`` is a NUL-separated (and NUL-terminated) argv blob.
+    Replace the separators with spaces, strip, and return ``None`` on any
+    ``OSError`` or when the result is empty (e.g. kernel threads).
+    """
+    try:
+        with open(f"{proc_root}/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return None
+    text = raw.replace(b"\x00", b" ").decode("utf-8", "replace").strip()
+    return text or None
+
+
+def read_proc_identity(pid: int, proc_root: str = "/proc",
+                       logger: "logging.Logger | None" = None) -> "tuple[int, int, str] | None":
+    """Return ``(pid, starttime, comm)`` for ``pid`` or ``None`` (logged skip).
+
+    On ANY failure (missing dir, dead pid, unparseable stat) log a
+    ``window_proc_missing`` event and return ``None`` -- a dead process is a
+    skip, never fatal (matches the dwmipc graceful-degrade ethos).
+    """
+    try:
+        with open(f"{proc_root}/{pid}/stat", "r") as f:
+            stat_text = f.read()
+        starttime = parse_starttime_from_stat(stat_text)
+        comm = read_proc_comm(pid, proc_root)
+        if comm is None:
+            raise ValueError("comm unreadable")
+        return (int(pid), starttime, comm)
+    except (OSError, ValueError) as e:
+        logev(logger or _LOG, logging.DEBUG, "window_proc_missing",
+              "process /proc entry missing or unparseable", pid=pid, error=str(e))
+        return None
+
+
+def resolve_pid(xid, reader, *, hostname: "str | None" = None,
+                proc_root: str = "/proc",
+                logger: "logging.Logger | None" = None) -> "tuple[int, int, str] | None":
+    """Resolve a dwm client window ``xid`` to LOCAL ``(pid, starttime, comm)``.
+
+    WM-03 entry point. ``_NET_WM_PID`` is the PRIMARY pid; XRes
+    ``res_query_client_ids`` is the fallback when the property is absent. A
+    ``WM_CLIENT_MACHINE`` whose stripped value differs from ``hostname`` (default
+    ``socket.gethostname()``) is skipped -- a remote client's PID is meaningless
+    locally (decision D of 09-CONTEXT). Any failure logs and returns ``None`` so
+    resolving one window never crashes the capture loop.
+    """
+    lg = logger or _LOG
+    try:
+        if hostname is None:
+            hostname = socket.gethostname()
+        machine = reader.client_machine(xid)
+        if machine and machine.strip() and machine.strip() != hostname:
+            logev(lg, logging.INFO, "window_skip_nonlocal",
+                  "window client-machine is non-local; skipping",
+                  xid=xid, machine=machine.strip(), hostname=hostname)
+            return None
+        pid = reader.net_wm_pid(xid)
+        if not pid:
+            pid = reader.xres_pid(xid)
+        if not pid:
+            return None
+        identity = read_proc_identity(pid, proc_root, logger=lg)
+        if identity is not None:
+            logev(lg, logging.DEBUG, "window_pid_resolve",
+                  "resolved window to local process",
+                  xid=xid, pid=identity[0], comm=identity[2])
+        return identity
+    except Exception as e:  # a single window must never crash capture
+        logev(lg, logging.WARNING, "window_resolve_fail",
+              "unexpected error resolving window identity", xid=xid, error=str(e))
+        return None
