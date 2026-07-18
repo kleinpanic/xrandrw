@@ -271,6 +271,11 @@ def request(mtype: int, payload: Union[bytes, str] = b"", *,
         body = _recvall(sock, size)
     except socket.timeout as e:
         raise DwmIpcUnavailable("socket timeout during request") from e
+    except OSError as e:
+        # A peer that RSTs/aborts mid-exchange surfaces as BrokenPipeError /
+        # ConnectionResetError on sendall/recv; mirror subscribe() and wrap it
+        # so no raw OSError leaks past the SEC-01 boundary.
+        raise DwmIpcUnavailable(f"socket error during request: {e}") from e
     finally:
         try:
             sock.close()

@@ -13,7 +13,7 @@ import time
 
 import pytest
 
-from xrandrw.dwmipc import DwmIpcUnavailable, GET_MONITORS, available, request
+from xrandrw.dwmipc import DwmIpcUnavailable, GET_MONITORS, available, get_monitors, request
 from dwmipc_fake_server import MAGIC, _HDR, FakeDwmServer
 
 
@@ -79,6 +79,21 @@ def test_request_close_mid_message_raises_dwmipc(sock_path):
     with FakeDwmServer(sock_path, mode="close_mid_message"):
         with pytest.raises(DwmIpcUnavailable):
             request(GET_MONITORS, path=str(sock_path), timeout=0.5)
+
+
+def test_request_rst_on_accept_raises_dwmipc_not_oserror(sock_path):
+    # Server RSTs the connection right after accept() (SO_LINGER 0), before
+    # reading. The send/recv OSError (BrokenPipeError/ConnectionResetError) must
+    # be wrapped as DwmIpcUnavailable, never leak as a raw OSError.
+    with FakeDwmServer(sock_path, mode="rst_on_accept"):
+        with pytest.raises(DwmIpcUnavailable):
+            request(GET_MONITORS, path=str(sock_path), timeout=0.5)
+
+
+def test_get_monitors_rst_on_accept_raises_dwmipc_not_oserror(sock_path):
+    with FakeDwmServer(sock_path, mode="rst_on_accept"):
+        with pytest.raises(DwmIpcUnavailable):
+            get_monitors(path=str(sock_path), timeout=0.5)
 
 
 # --- WM-02 capability gate --------------------------------------------------

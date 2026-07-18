@@ -75,6 +75,8 @@ _HOSTILE_MODES = {
     "wrong_schema",
     "close_mid_message",
     "hang",
+    "rst_on_accept",
+    "slow_trickle",
 }
 
 
@@ -94,7 +96,8 @@ class FakeDwmServer:
     """
 
     def __init__(self, path, mode: str = "auto", *, monitors=None, client=None,
-                 run_result=None, oversized_size: int = 256 * 1024 * 1024):
+                 run_result=None, oversized_size: int = 256 * 1024 * 1024,
+                 trickle_interval: float = 0.05):
         if mode not in _VALID_MODES and mode not in _HOSTILE_MODES:
             raise ValueError(f"unknown fake-server mode {mode!r}")
         self.path = str(path)
@@ -103,6 +106,7 @@ class FakeDwmServer:
         self.client = client if client is not None else VALID_CLIENT
         self.run_result = run_result if run_result is not None else VALID_RUN_COMMAND
         self.oversized_size = oversized_size
+        self.trickle_interval = trickle_interval
         # Every request the server received, as (rtype, size, payload_bytes).
         self.received: List[Tuple[int, int, bytes]] = []
         self._stop = threading.Event()
@@ -188,6 +192,19 @@ class FakeDwmServer:
     def _handle(self, conn: socket.socket) -> None:
         mode = self.mode
 
+        if mode == "rst_on_accept":
+            # Abort the connection right after accept(), BEFORE reading anything:
+            # SO_LINGER with a zero timeout makes close() send a TCP/AF_UNIX RST,
+            # so the client's sendall()/recv() sees an OSError (ECONNRESET /
+            # EPIPE) rather than a clean FIN. Exercises the send-side OSError path.
+            try:
+                linger = struct.pack("ii", 1, 0)  # l_onoff=1, l_linger=0 -> RST
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+                conn.close()
+            except OSError:
+                pass
+            return
+
         if mode == "hang":
             # Accept + read the request, then never reply until shutdown, to
             # exercise the client's socket timeout (no unbounded block).
@@ -197,6 +214,21 @@ class FakeDwmServer:
 
         req = self._read_request(conn)
         rtype = req[0] if req is not None else GET_MONITORS
+
+        if mode == "slow_trickle":
+            # Drip a well-formed reply one byte at a time with a gap SHORTER than
+            # the client's per-recv timeout, so no single recv() ever trips
+            # socket.timeout -- only a TOTAL wall-clock deadline can bound this.
+            reply = self._valid_reply(rtype)
+            for i in range(len(reply)):
+                if self._stop.is_set():
+                    return
+                try:
+                    conn.sendall(reply[i:i + 1])
+                except OSError:
+                    return
+                self._stop.wait(timeout=self.trickle_interval)
+            return
 
         if mode == "truncated_header":
             conn.sendall(b"DWM-")  # < 12 bytes, then close
