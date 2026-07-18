@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from xrandrw import config
-from xrandrw.config import _coerce_int, load_config, resolve_lock_dir
+from xrandrw.config import _coerce_int, _load_env_file, load_config, resolve_lock_dir
 
 
 @pytest.fixture
@@ -75,6 +75,65 @@ def test_load_config_apply_backend_native_preserved(monkeypatch, isolated_config
     monkeypatch.setenv("APPLY_BACKEND", "native")
     env, _ = load_config()
     assert env["APPLY_BACKEND"] == "native"
+
+
+def test_load_env_file_parsing(tmp_path):
+    conf = tmp_path / "x.conf"
+    conf.write_text(
+        "# comment\n"
+        "\n"
+        "not-a-kv-line\n"
+        "KEY1=plain\n"
+        "KEY2='single quoted'\n"
+        'KEY3="double quoted"\n'
+        "KEY4 = spaced \n"
+    )
+    assert _load_env_file(conf) == {
+        "KEY1": "plain",
+        "KEY2": "single quoted",
+        "KEY3": "double quoted",
+        "KEY4": "spaced",
+    }
+
+
+def test_load_env_file_missing(tmp_path):
+    assert _load_env_file(tmp_path / "nope.conf") == {}
+
+
+def test_missing_conf_files_yield_defaults(isolated_config):
+    env, warnings = load_config()
+    assert warnings == []
+    assert env["PREF_DEFAULT_SIDE"] == config.ENV_DEFAULTS["PREF_DEFAULT_SIDE"]
+    assert env["HIDPI_WIDTH"] == config.ENV_DEFAULTS["HIDPI_WIDTH"]
+    assert env["WALLPAPER_ENGINE"] == ""
+
+
+def test_conf_file_and_env_precedence(monkeypatch, isolated_config, tmp_path):
+    sys_conf = tmp_path / "sys.conf"
+    user_conf = tmp_path / "user.conf"
+    sys_conf.write_text("HIDPI_WIDTH=1000\nPOLL_INTERVAL=50\n")
+    user_conf.write_text('HIDPI_WIDTH="1500"\n')
+    monkeypatch.setattr(config, "CONF_SYS", sys_conf)
+    monkeypatch.setattr(config, "CONF_USER", user_conf)
+
+    env, warnings = load_config()
+    assert warnings == []
+    assert env["HIDPI_WIDTH"] == "1500", "user conf must beat sys conf"
+    assert env["POLL_INTERVAL"] == "50", "sys conf value survives where user conf is silent"
+
+    monkeypatch.setenv("HIDPI_WIDTH", "2000")
+    env2, _ = load_config()
+    assert env2["HIDPI_WIDTH"] == "2000", "process env must beat both conf files"
+
+
+def test_conf_file_malformed_numeric_warns(monkeypatch, isolated_config, tmp_path):
+    user_conf = tmp_path / "user.conf"
+    user_conf.write_text("POLL_INTERVAL=fast\n")
+    monkeypatch.setattr(config, "CONF_USER", user_conf)
+
+    env, warnings = load_config()
+    assert env["POLL_INTERVAL"] == config.ENV_DEFAULTS["POLL_INTERVAL"]
+    assert any("POLL_INTERVAL" in w for w in warnings)
 
 
 def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
