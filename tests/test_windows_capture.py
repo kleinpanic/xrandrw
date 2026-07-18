@@ -230,6 +230,48 @@ def test_capture_get_monitors_unavailable_returns_empty(tmp_path, monkeypatch, l
                for r in caplog.records)
 
 
+def test_capture_malformed_clients_shape_skips_monitor_not_capture(tmp_path, monkeypatch, logger, caplog):
+    # BLOCKER 1: a clients that isn't a dict (['not','a','dict']) and a clients
+    # whose 'all' isn't a list ({'all': 12345}) must each yield a graceful
+    # per-monitor skip -- other monitors are still captured, no exception.
+    _make_proc(tmp_path, 1234)
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="edidA"),
+        "DP-2": _out("DP-2", mode=(1920, 1080), position=(1920, 0), edid="edidB"),
+        "DP-3": _out("DP-3", mode=(1280, 720), position=(0, 1080), edid="edidC"),
+    }
+    mons = [
+        # monitor 0: clients is a list, not a dict -> skip this monitor only
+        {"num": 0, "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080},
+         "clients": ["not", "a", "dict"]},
+        # monitor 1: clients.all is an int, not a list -> skip this monitor only
+        {"num": 1, "monitor_geometry": {"x": 1920, "y": 0, "width": 1920, "height": 1080},
+         "clients": {"all": 12345}},
+        # monitor 2: well-formed -> its window is still captured
+        _mon(2, 0, 1080, 1280, 720, clients=[0x33]),
+    ]
+
+    def client_for(xid, path=None, **kw):
+        return {"name": "app", "tags": 1, "monitor_number": 2,
+                "geometry": {"current": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "states": {"is_floating": False, "is_fullscreen": False}}
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+        recs = capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                               proc_root=str(tmp_path), hostname="localhost",
+                               sock_path="/x", logger=logger)
+    # The well-formed monitor's window survives; malformed ones did not abort it.
+    assert len(recs) == 1
+    assert recs[0].output == "DP-3" and recs[0].edid == "edidC"
+    skips = [r for r in caplog.records
+             if getattr(r, "event", None) == "window_capture_skip"]
+    assert len(skips) == 2, "both malformed monitors must log a graceful skip"
+
+
 def test_capture_get_dwm_client_unavailable_skips_one(tmp_path, monkeypatch, logger):
     _make_proc(tmp_path, 1234)
     outs = {

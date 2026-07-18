@@ -409,7 +409,25 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
     records: List[WindowRecord] = []
     for mon in monitors:
         mnum = mon.get("num")
-        clients = (mon.get("clients") or {}).get("all") or []
+        # Validate the clients shape defensively OUTSIDE the per-window try/except:
+        # a malformed ``clients`` (not a dict) or ``clients.all`` (not a list) must
+        # skip only THIS monitor and continue, never abort the whole capture.
+        clients_obj = mon.get("clients")
+        if clients_obj is None:
+            continue  # monitor has no clients this cycle
+        if not isinstance(clients_obj, dict):
+            logev(lg, logging.DEBUG, "window_capture_skip",
+                  "monitor clients is not a dict; skipping monitor",
+                  monitor=mnum)
+            continue
+        clients = clients_obj.get("all")
+        if clients is None:
+            continue
+        if not isinstance(clients, list):
+            logev(lg, logging.DEBUG, "window_capture_skip",
+                  "monitor clients.all is not a list; skipping monitor",
+                  monitor=mnum)
+            continue
         for xid in clients:
             try:
                 identity = resolve_pid(xid, xreader, hostname=hostname,
