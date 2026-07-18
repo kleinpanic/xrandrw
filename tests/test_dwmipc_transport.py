@@ -69,6 +69,19 @@ def test_request_hang_is_time_bounded(sock_path):
     assert elapsed < 2.0
 
 
+def test_request_slow_trickle_is_time_bounded(sock_path):
+    # Peer drips one byte every 0.05s -- each gap is inside the 0.2s per-recv
+    # timeout, so a naive per-recv budget would never trip and the thread would
+    # be held open for the full (bytes * 0.05s) reply. The single monotonic
+    # deadline must bound TOTAL wall-time to a small multiple of the timeout.
+    with FakeDwmServer(sock_path, mode="slow_trickle", trickle_interval=0.05):
+        start = time.monotonic()
+        with pytest.raises(DwmIpcUnavailable):
+            request(GET_MONITORS, path=str(sock_path), timeout=0.2)
+        elapsed = time.monotonic() - start
+    assert elapsed < 2.0, elapsed
+
+
 def test_request_oversized_rejected_before_body_read(sock_path):
     with FakeDwmServer(sock_path, mode="oversized"):
         with pytest.raises(DwmIpcUnavailable):

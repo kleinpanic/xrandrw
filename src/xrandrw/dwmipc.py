@@ -29,6 +29,7 @@ import math
 import os
 import socket
 import struct
+import time
 from typing import Any, Iterable, Tuple, Union
 
 from xrandrw.logging_utils import logev
@@ -222,15 +223,25 @@ def validate_client(obj: Any) -> dict:
 # and every read is bounded (_recvall). The reply size cap lives in parse_header
 # and therefore runs BEFORE the body is ever read.
 
-def _recvall(sock: socket.socket, n: int) -> bytes:
+def _recvall(sock: socket.socket, n: int, deadline: float = None) -> bytes:
     """Read exactly ``n`` bytes from ``sock`` or raise :class:`DwmIpcUnavailable`.
 
-    Inherits the socket's timeout, so a stalled peer surfaces as
-    ``socket.timeout`` which is wrapped as :class:`DwmIpcUnavailable`. A peer that
-    closes before ``n`` bytes arrive (truncated / mid-message close) also raises.
+    A per-``recv`` timeout alone is NOT enough: a peer trickling one byte just
+    inside the timeout every time resets the budget forever and holds the thread
+    open (a slow-trickle DoS). ``deadline`` is a single ``time.monotonic()``
+    instant computed once at :func:`request` start; the socket timeout is
+    re-armed each loop to the *remaining* budget so TOTAL request wall-time is
+    bounded regardless of how the peer paces its bytes. A stalled or closed peer
+    still surfaces as :class:`DwmIpcUnavailable` (never ``socket.timeout`` /
+    ``OSError``).
     """
     buf = b""
     while len(buf) < n:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise DwmIpcUnavailable("request deadline exceeded during recv")
+            sock.settimeout(remaining)
         try:
             chunk = sock.recv(n - len(buf))
         except socket.timeout as e:
@@ -269,10 +280,13 @@ def request(mtype: int, payload: Union[bytes, str] = b"", *,
         # before connect, so the earlier combined-try left it dangling).
         sock.close()
         raise DwmIpcUnavailable(f"connect {path}: {e}") from e
+    # Single monotonic deadline for the whole exchange so a byte-trickling peer
+    # cannot hold the thread open past `timeout` by resetting the per-recv budget.
+    deadline = time.monotonic() + timeout
     try:
         sock.sendall(pack_header(mtype, len(payload)) + payload)
-        size, rtype = parse_header(_recvall(sock, _HDR.size))
-        body = _recvall(sock, size)
+        size, rtype = parse_header(_recvall(sock, _HDR.size, deadline))
+        body = _recvall(sock, size, deadline)
     except socket.timeout as e:
         raise DwmIpcUnavailable("socket timeout during request") from e
     except OSError as e:
