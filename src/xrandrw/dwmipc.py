@@ -28,6 +28,7 @@ import logging
 import math
 import os
 import socket
+import stat
 import struct
 import time
 from typing import Any, Iterable, Tuple, Union
@@ -223,6 +224,34 @@ def validate_client(obj: Any) -> dict:
 # and every read is bounded (_recvall). The reply size cap lives in parse_header
 # and therefore runs BEFORE the body is ever read.
 
+def _preflight_socket(path: str) -> None:
+    """Reject a socket ``path`` that is not a current-uid-owned socket (SEC-01).
+
+    ``/tmp/dwm.sock`` lives in world-writable ``/tmp``, where an attacker could
+    pre-create a file or a foreign-owned socket at that path before dwm starts.
+    This cheap pre-connect guard uses ``os.lstat`` (NOT ``stat`` -- a symlink is
+    itself rejected, defeating a symlink-swap) and requires the path to be a real
+    socket (:func:`stat.S_ISSOCK`) owned by the current uid. It is defense in
+    depth for the local single-user desktop posture, not a substitute for the
+    parse-side hardening; the normal case (dwm creates the socket as the same
+    user) is unaffected. Raises :class:`DwmIpcUnavailable` on any mismatch so the
+    caller degrades gracefully (``available`` -> ``False``) instead of connecting
+    to a possibly attacker-preplaced endpoint.
+    """
+    try:
+        st = os.lstat(path)
+    except OSError as e:
+        raise DwmIpcUnavailable(f"stat {path}: {e}") from e
+    if not stat.S_ISSOCK(st.st_mode):
+        logev(logger, logging.WARNING, "dwmipc_path_reject", "socket path is not a socket",
+              reason="not_socket", path=path)
+        raise DwmIpcUnavailable(f"{path} is not a socket")
+    if st.st_uid != os.getuid():
+        logev(logger, logging.WARNING, "dwmipc_path_reject", "socket path not owned by current uid",
+              reason="foreign_owner", path=path, owner=st.st_uid, uid=os.getuid())
+        raise DwmIpcUnavailable(f"{path} owned by uid {st.st_uid}, not {os.getuid()}")
+
+
 def _recvall(sock: socket.socket, n: int, deadline: float = None) -> bytes:
     """Read exactly ``n`` bytes from ``sock`` or raise :class:`DwmIpcUnavailable`.
 
@@ -270,6 +299,7 @@ def request(mtype: int, payload: Union[bytes, str] = b"", *,
     if isinstance(payload, str):
         payload = payload.encode()
     payload = payload + b"\x00"  # size INCLUDES the terminator (empty GET = size 1)
+    _preflight_socket(path)  # SEC-01: refuse a non-socket / foreign-owned path before connect
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)
@@ -379,6 +409,7 @@ def subscribe(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT
     connection or send fails.
     """
     payload = b"\x00"  # size INCLUDES the terminator; concrete event payload is Phase 10
+    _preflight_socket(path)  # SEC-01: refuse a non-socket / foreign-owned path before connect
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         sock.settimeout(timeout)

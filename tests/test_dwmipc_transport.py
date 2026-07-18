@@ -8,11 +8,13 @@ SEC-01 timeout / bounded-read / size-cap hardening.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 
 import pytest
 
+import xrandrw.dwmipc as dwmipc
 from xrandrw.dwmipc import DwmIpcUnavailable, GET_MONITORS, available, get_monitors, request
 from dwmipc_fake_server import MAGIC, _HDR, FakeDwmServer
 
@@ -130,6 +132,38 @@ def test_connect_failure_closes_socket_no_resourcewarning(tmp_path):
         assert not leaked, [str(w.message) for w in leaked]
     finally:
         dead.close()
+
+
+# --- SEC-01 socket-path spoofing guard (defense-in-depth) -------------------
+
+def test_request_non_socket_path_unavailable(tmp_path):
+    # A regular file pre-placed at the expected path (world-writable /tmp attack)
+    # must be refused before connect, not treated as a live endpoint.
+    p = tmp_path / "dwm.sock"
+    p.write_text("i am not a socket")
+    with pytest.raises(DwmIpcUnavailable):
+        request(GET_MONITORS, path=str(p))
+    assert available(path=str(p)) is False
+
+
+def test_request_foreign_owned_socket_unavailable(sock_path, monkeypatch):
+    # A real, live socket whose owner uid differs from ours (simulated by
+    # reporting a different current uid) must be refused: an attacker-preplaced
+    # endpoint should never be connected to.
+    real_uid = os.getuid()
+    with FakeDwmServer(sock_path, mode="auto"):
+        monkeypatch.setattr(dwmipc.os, "getuid", lambda: real_uid + 424242)
+        with pytest.raises(DwmIpcUnavailable):
+            request(GET_MONITORS, path=str(sock_path))
+        assert available(path=str(sock_path)) is False
+
+
+def test_request_owned_socket_still_works(sock_path):
+    # Guard must NOT break the normal case: dwm creates the socket as the same
+    # user, so a uid-owned socket round-trips exactly as before.
+    with FakeDwmServer(sock_path, mode="auto"):
+        rtype, data = request(GET_MONITORS, path=str(sock_path))
+    assert rtype == GET_MONITORS and isinstance(data, list) and data
 
 
 # --- WM-02 capability gate --------------------------------------------------
