@@ -1,5 +1,9 @@
 # xrandrw
 
+[![PyPI version](https://img.shields.io/pypi/v/xrandrw.svg)](https://pypi.org/project/xrandrw/)
+[![Python versions](https://img.shields.io/pypi/pyversions/xrandrw.svg)](https://pypi.org/project/xrandrw/)
+[![License: MIT](https://img.shields.io/pypi/l/xrandrw.svg)](https://github.com/kleinpanic/xrandrw/blob/main/LICENSE)
+
 Zero-config, self-healing X11 display-layout daemon for dwm/i3 and other
 bare-X11 window managers. It watches for monitor hotplug/unplug, remembers each
 display by its EDID identity, and auto-places externals relative to a primary
