@@ -315,9 +315,15 @@ def get_dwm_client(win: int, path: str = DEFAULT_SOCK_PATH, *,
     """Return the validated client dict for window ``win`` from GET_DWM_CLIENT.
 
     The payload key is ``client_window_id`` and the value MUST be a JSON int
-    (confirmed via strace in spike 001); ``win`` is coerced with ``int()``.
+    (confirmed via strace in spike 001); ``win`` is coerced with ``int()``. A
+    non-numeric ``win`` is a caller error re-raised as :class:`DwmIpcUnavailable`
+    so a raw ``ValueError`` never escapes this module's single boundary type.
     """
-    payload = json.dumps({"client_window_id": int(win)})
+    try:
+        wid = int(win)
+    except (TypeError, ValueError) as e:
+        raise DwmIpcUnavailable(f"invalid window id {win!r}: {e}") from e
+    payload = json.dumps({"client_window_id": wid})
     return validate_client(request(GET_DWM_CLIENT, payload, path=path, timeout=timeout)[1])
 
 
@@ -327,9 +333,15 @@ def run_command(name: str, *args: int, path: str = DEFAULT_SOCK_PATH,
 
     dwm's arg types are strictly typed for UINT/SINT -- a string arg makes dwm
     return ``{"result":"error","reason":"Type mismatch"}`` -- so every positional
-    arg is coerced with ``int()`` before framing. Returns the decoded result.
+    arg is coerced with ``int()`` before framing. A non-numeric arg is a caller
+    error re-raised as :class:`DwmIpcUnavailable` (consistent single escape type),
+    never a raw ``ValueError``. Returns the decoded result.
     """
-    payload = json.dumps({"command": str(name), "args": [int(a) for a in args]})
+    try:
+        int_args = [int(a) for a in args]
+    except (TypeError, ValueError) as e:
+        raise DwmIpcUnavailable(f"invalid command arg: {e}") from e
+    payload = json.dumps({"command": str(name), "args": int_args})
     return request(RUN_COMMAND, payload, path=path, timeout=timeout)[1]
 
 

@@ -118,3 +118,17 @@ def test_subscribe_returns_open_socket_without_consuming_events(sock_path):
 def test_subscribe_missing_socket_raises_dwmipc(tmp_path):
     with pytest.raises(DwmIpcUnavailable):
         subscribe(path=str(tmp_path / "nope.sock"))
+
+
+# --- verbs must not leak a raw ValueError from int() coercion ---------------
+
+def test_run_command_non_numeric_arg_raises_dwmipc(tmp_path):
+    # int("not-a-number") happens before any socket op, so no server is needed;
+    # it must surface as DwmIpcUnavailable, never a raw ValueError.
+    with pytest.raises(DwmIpcUnavailable):
+        run_command("cmd", "not-a-number", path=str(tmp_path / "dwm.sock"))
+
+
+def test_get_dwm_client_non_numeric_window_raises_dwmipc(tmp_path):
+    with pytest.raises(DwmIpcUnavailable):
+        get_dwm_client("x", path=str(tmp_path / "dwm.sock"))
