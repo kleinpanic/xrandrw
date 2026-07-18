@@ -17,6 +17,9 @@ class Output:
     connected: bool
     primary: bool = False
     current_mode: Optional[Tuple[int, int]] = None
+    # CRTC origin (x, y); None when the output has no CRTC. Additive (Phase 9,
+    # WM-04) so dwm monitor_geometry can be matched by full position+size.
+    position: Optional[Tuple[int, int]] = None
     modes: List[Tuple[int, int, float, str]] = field(default_factory=list)  # (w,h,rate,flags "*+")
     edid_sha1: Optional[str] = None
 
@@ -29,6 +32,7 @@ def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> D
     for oi in output_infos:
         ci = crtc_infos.get(oi.crtc) if oi.crtc else None
         current_mode = (ci.width, ci.height) if ci else None
+        position = (ci.x, ci.y) if ci else None
         cur_mode_id = ci.mode if ci else 0
         mode_tuples: List[Tuple[int, int, float, str]] = []
         for i, mid in enumerate(oi.modes):
@@ -46,6 +50,7 @@ def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> D
             connected=(oi.connection == randr.Connected),
             primary=(oi.oid == primary_id),
             current_mode=current_mode,
+            position=position,
             modes=mode_tuples,
         )
     return outs

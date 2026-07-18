@@ -256,3 +256,41 @@ def resolve_pid(xid, reader, *, hostname: "str | None" = None,
         logev(lg, logging.WARNING, "window_resolve_fail",
               "unexpected error resolving window identity", xid=xid, error=str(e))
         return None
+
+
+# --------------------------------------------------------------------------
+# Pure dwm-monitor <-> output geometry matcher (no X, no sockets, no dwm)
+# --------------------------------------------------------------------------
+
+def match_dwm_monitor_to_output(dwm_monitors, outputs,
+                                logger: "logging.Logger | None" = None):
+    """Map each dwm ``monitor_number`` to an xrandrw connector by geometry.
+
+    ``dwm_monitors`` is the validated ``get_monitors()`` list (each dict has
+    ``num`` and ``monitor_geometry{x,y,width,height}``); ``outputs`` is the
+    ``{connector: Output}`` mapping from ``RandRReader().read()``. For each
+    monitor, find the single CONNECTED output whose ``position == (mg.x, mg.y)``
+    AND ``current_mode == (mg.width, mg.height)``; map ``num -> connector``.
+    Zero or MORE-THAN-ONE matches map ``num -> None`` and log a
+    ``window_monitor_unmatched`` event with the raw geometry -- never
+    guess-associate (decision D of 09-CONTEXT).
+    """
+    lg = logger or _LOG
+    result: "dict[int, str | None]" = {}
+    for mon in dwm_monitors:
+        num = mon.get("num")
+        mg = mon.get("monitor_geometry") or {}
+        want_pos = (mg.get("x"), mg.get("y"))
+        want_mode = (mg.get("width"), mg.get("height"))
+        matches = [
+            name for name, o in outputs.items()
+            if o.connected and o.position == want_pos and o.current_mode == want_mode
+        ]
+        if len(matches) == 1:
+            result[num] = matches[0]
+        else:
+            result[num] = None
+            logev(lg, logging.INFO, "window_monitor_unmatched",
+                  "no confident single output match for dwm monitor",
+                  monitor=num, geometry=mg, candidates=len(matches))
+    return result
