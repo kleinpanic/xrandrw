@@ -9,7 +9,7 @@ from typing import Dict, List, Protocol
 
 from xrandrw.logging_utils import run, wait_for_x, loge, logev
 from xrandrw.xrandr import Output, read_xrandr, read_edids
-from xrandrw.state import load_state, save_state, ensure_profile, _open_lock_fd, state_lock
+from xrandrw.state import load_state, save_state, ensure_profile, get_profile, _open_lock_fd, state_lock
 from xrandrw.policy import is_internal_lcd, current_or_preferred_mode, assign_placements
 from xrandrw.profiles import parse_all_profiles, match_profile, build_xrandr_argv
 from xrandrw.wallpaper import apply_wallpaper
@@ -199,7 +199,9 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                 for name, pid in pid_by_output.items():
                     conns_by_pid.setdefault(pid, []).append(name)
                 ordered_conns = [c for pid in ordered_pids for c in sorted(conns_by_pid[pid])]
-                placements = assign_placements(ordered_conns, pnl.name)
+                ordered = [(c, get_profile(st, pid_by_output[c]).get("preferred_side") or default_side)
+                           for c in ordered_conns]
+                placements = assign_placements(ordered, pnl.name)
                 for connector, rel_opt, anchor_connector in placements:
                     pid = pid_by_output[connector]
                     if anchor_connector == pnl.name:
@@ -235,7 +237,9 @@ def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = 
                 for name, pid in pid_by_output.items():
                     conns_by_pid.setdefault(pid, []).append(name)
                 ordered_conns = [c for pid in ordered_pids for c in sorted(conns_by_pid[pid])]
-                placements = assign_placements(ordered_conns, first.name)
+                ordered = [(c, get_profile(st, pid_by_output[c]).get("preferred_side") or default_side)
+                           for c in ordered_conns]
+                placements = assign_placements(ordered, first.name)
                 for connector, rel_opt, anchor_connector in placements:
                     pid = pid_by_output[connector]
                     if anchor_connector == first.name:

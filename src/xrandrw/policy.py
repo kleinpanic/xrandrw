@@ -1,8 +1,7 @@
 from __future__ import annotations
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from xrandrw.xrandr import Output
-from xrandrw.state import get_profile
 
 SIDES = ("right-of", "left-of", "above", "below")
 
@@ -21,18 +20,24 @@ def current_or_preferred_mode(o: Output) -> Optional[Tuple[int, int]]:
             return (w, h)
     return o.current_mode
 
-def assign_placements(ordered_pids: List[str], anchor: str, chain_side: str = "right-of") -> List[Tuple[str, str, str]]:
+def assign_placements(ordered: List[Tuple[str, str]], anchor: str,
+                      chain_side: str = "right-of") -> List[Tuple[str, str, str]]:
+    # `ordered` is (item, preferred_side) pairs, newest first. Each item takes its
+    # preferred side relative to `anchor` if free; on collision it takes the next free
+    # side; once all four sides are occupied, further items chain off the previously
+    # placed item (HARD-04, uncapped). Honoring preferred_side is what makes set-pref
+    # persist — placing purely by index would silently ignore the stored side.
     placements: List[Tuple[str, str, str]] = []
-    for i, pid in enumerate(ordered_pids):
-        if i < len(SIDES):
-            placements.append((pid, SIDES[i], anchor))
+    occupied: dict = {}
+    last_item: Optional[str] = None
+    for item, pref in ordered:
+        if len(occupied) >= len(SIDES):
+            placements.append((item, chain_side, last_item))
         else:
-            placements.append((pid, chain_side, ordered_pids[i - 1]))
+            side = pref if pref in SIDES else chain_side
+            if side in occupied:
+                side = next(s for s in SIDES if s not in occupied)
+            occupied[side] = item
+            placements.append((item, side, anchor))
+        last_item = item
     return placements
-
-def pick_side_for(pid: str, st: Dict[str, dict], occupied: Dict[str, str], default_side: str) -> str:
-    prof = get_profile(st, pid)
-    pref = prof.get("preferred_side") or default_side
-    chosen = pref if pref not in occupied else next((s for s in SIDES if s not in occupied), default_side)
-    prof["last_side"] = chosen
-    return chosen

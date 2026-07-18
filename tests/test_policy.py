@@ -15,51 +15,58 @@ def test_external_connectors_are_not_internal():
         assert not is_internal_lcd(name), name
 
 
+def _pref(items, side="right-of"):
+    return [(i, side) for i in items]
+
+
 def test_assign_placements_single():
-    assert assign_placements(["a"], "PRIM") == [("a", "right-of", "PRIM")]
+    assert assign_placements([("a", "right-of")], "PRIM") == [("a", "right-of", "PRIM")]
 
 
-def test_assign_placements_first_four_anchor_to_primary():
-    result = assign_placements(["a", "b", "c", "d"], "PRIM")
+def test_assign_placements_honors_preferred_side():
+    # The whole point of set-pref: an item lands on its STORED side, not an index default.
+    assert assign_placements([("a", "left-of")], "PRIM") == [("a", "left-of", "PRIM")]
+    assert assign_placements([("a", "above")], "PRIM") == [("a", "above", "PRIM")]
+    assert assign_placements([("a", "below")], "PRIM") == [("a", "below", "PRIM")]
+
+
+def test_assign_placements_collision_falls_back_to_free_side():
+    # Two items want left-of; the first (newest) wins it, the other takes the next free side.
+    result = assign_placements([("a", "left-of"), ("b", "left-of")], "PRIM")
+    assert result[0] == ("a", "left-of", "PRIM")
+    assert result[1][0] == "b" and result[1][1] != "left-of" and result[1][2] == "PRIM"
+
+
+def test_assign_placements_four_distinct_prefs_all_anchor_primary():
+    result = assign_placements(
+        [("a", "right-of"), ("b", "left-of"), ("c", "above"), ("d", "below")], "PRIM")
     assert result == [
-        ("a", SIDES[0], "PRIM"),
-        ("b", SIDES[1], "PRIM"),
-        ("c", SIDES[2], "PRIM"),
-        ("d", SIDES[3], "PRIM"),
+        ("a", "right-of", "PRIM"), ("b", "left-of", "PRIM"),
+        ("c", "above", "PRIM"), ("d", "below", "PRIM"),
     ]
 
 
-def test_assign_placements_chains_beyond_four():
-    result = assign_placements(["a", "b", "c", "d", "e"], "PRIM")
+def test_assign_placements_same_pref_fills_free_sides_then_chains():
+    # All want right-of: first takes it, the rest fall back through the free sides,
+    # and the 5th (all four sides taken) chains off the previously placed item.
+    result = assign_placements(_pref(["a", "b", "c", "d", "e"]), "PRIM")
+    assert [r[1] for r in result[:4]] == list(SIDES)
+    assert all(r[2] == "PRIM" for r in result[:4])
     assert result[4] == ("e", "right-of", "d")
 
 
-def test_assign_placements_seven_chain_off_previous():
-    pids = ["a", "b", "c", "d", "e", "f", "g"]
-    result = assign_placements(pids, "PRIM")
+def test_assign_placements_chain_beyond_four_off_previous():
+    result = assign_placements(_pref(["a", "b", "c", "d", "e", "f", "g"]), "PRIM")
     for i in (4, 5, 6):
-        assert result[i] == (pids[i], "right-of", pids[i - 1])
+        assert result[i][1] == "right-of" and result[i][2] == result[i - 1][0]
 
 
 def test_assign_placements_no_collision_among_primary_anchored():
-    pids = ["a", "b", "c", "d", "e", "f", "g"]
-    result = assign_placements(pids, "PRIM")
-    primary_anchored = [(rel, ref) for _, rel, ref in result[:4]]
-    assert len(set(primary_anchored)) == 4
+    result = assign_placements(_pref(["a", "b", "c", "d"]), "PRIM")
+    sides = [r[1] for r in result]
+    assert len(set(sides)) == 4
 
 
 def test_assign_placements_chain_side_override():
-    result = assign_placements(["a", "b", "c", "d", "e"], "PRIM", chain_side="below")
+    result = assign_placements(_pref(["a", "b", "c", "d", "e"]), "PRIM", chain_side="below")
     assert result[4] == ("e", "below", "d")
-
-
-def test_assign_placements_invariant():
-    pids = ["a", "b", "c", "d", "e", "f"]
-    anchor = "PRIM"
-    chain_side = "right-of"
-    result = assign_placements(pids, anchor, chain_side=chain_side)
-    for i, entry in enumerate(result):
-        if i < len(SIDES):
-            assert entry == (pids[i], SIDES[i], anchor)
-        else:
-            assert entry == (pids[i], chain_side, pids[i - 1])

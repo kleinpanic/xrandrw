@@ -184,6 +184,28 @@ def _isolate_state(monkeypatch):
     monkeypatch.setattr(apply_mod, "save_state", lambda st: None)
 
 
+def test_apply_honors_stored_preferred_side(tmp_path, mock_x, logger, monkeypatch):
+    # Regression: --set-pref writes preferred_side, but apply_once placed by attach-order
+    # index and IGNORED it, so a monitor set to left-of still landed right-of. Placement
+    # must honor the stored side.
+    calls, set_outputs = mock_x
+    set_outputs(["DSI-1", "HDMI-1"])  # DSI internal primary, HDMI the sole external
+    pid = "hdmipid"
+    stored = {
+        "profiles": {pid: {"names": ["HDMI-1"], "edid": None,
+                           "preferred_side": "left-of", "last_seen": 0}},
+        "identity_map": {"conn:HDMI-1": pid},
+        "attach_stack": [pid],
+    }
+    monkeypatch.setattr(apply_mod, "load_state", lambda: stored)
+    monkeypatch.setattr(apply_mod, "save_state", lambda st, path=None: None)
+
+    apply_mod.apply_once(_env(tmp_path), logger)
+
+    assert ("HDMI-1", "left-of", "DSI-1") in calls, "stored left-of must be honored"
+    assert ("HDMI-1", "right-of", "DSI-1") not in calls
+
+
 def test_identical_edid_externals_both_placed(tmp_path, mock_x, logger, monkeypatch, output_factory):
     # WR-03: two externals with the same EDID collapse to ONE profile id; both connectors
     # must still get a placement (previously one landed overlapped at 0x0).
