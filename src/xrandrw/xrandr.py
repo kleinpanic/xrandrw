@@ -32,7 +32,11 @@ def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> D
         cur_mode_id = ci.mode if ci else 0
         mode_tuples: List[Tuple[int, int, float, str]] = []
         for i, mid in enumerate(oi.modes):
-            m = modemap[mid]
+            # WR-02: a hotplug between the two RandR round-trips can leave the output
+            # referencing a mode id absent from this snapshot; skip it rather than crash.
+            m = modemap.get(mid)
+            if m is None:
+                continue
             rate = m.dot_clock / (m.h_total * m.v_total) if m.h_total and m.v_total else 0.0
             flags = ("*" if mid == cur_mode_id else "") + ("+" if i < oi.num_preferred else "")
             mode_tuples.append((m.width, m.height, round(rate, 2), flags))
@@ -161,6 +165,9 @@ def topology_hash(logger: Optional[logging.Logger] = None) -> str:
     parts = []
     for name in sorted(outs):
         o = outs[name]
-        if o.connected:
+        # A disconnected head whose CRTC is still lit (unplug leaves it driving pixels) must
+        # be visible to change detection or the daemon never heals it. Idle disconnected
+        # connectors (no CRTC) stay out of the hash to avoid churn noise.
+        if o.connected or o.current_mode is not None:
             parts.append(f"{o.name}|{o.connected}|{o.current_mode}")
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()
