@@ -301,7 +301,12 @@ class RelocationCoordinator:
         self._ipc_timeout = ipc_timeout
         self._displaced: dict[tuple[int, int], object] = {}
         self._snapshot: dict[tuple[int, int], object] = {}
-        self._prev_connected: set[str] | None = None
+        # PRESENT, not CONNECTED (WR-04). Holds the set of outputs with a LIVE
+        # CRTC (Output.is_lit) as of the last settle -- NOT the HPD connected set.
+        # The old `_prev_connected` name survived the 14-08 switch to CRTC liveness
+        # and became an active lie: it is read cross-module by name (cli.py) and
+        # someone debugging a future incident would reach for HPD state.
+        self._prev_present: set[str] | None = None
 
     @property
     def _path(self) -> str:
@@ -317,8 +322,8 @@ class RelocationCoordinator:
     def on_settled(self, env, logger, stop_evt=None) -> None:
         """Post-apply hook: record on unplug, restore on replug, seed on boot.
 
-        A no-op unless :meth:`_enabled`. On the FIRST call (``_prev_connected``
-        is None) it only seeds the baseline (``_prev_connected`` + ``_snapshot``)
+        A no-op unless :meth:`_enabled`. On the FIRST call (``_prev_present``
+        is None) it only seeds the baseline (``_prev_present`` + ``_snapshot``)
         so the FIRST unplug of the session is recordable -- the first cycle is
         never lost. Thereafter a removed output moves last-snapshot records into
         ``_displaced``; a returned output restores same-identity records; a
@@ -360,22 +365,26 @@ class RelocationCoordinator:
         #     TOGETHER and neither alone.
         #   * HPD `connected` cannot substitute. On the live trace, by the post-apply
         #     settle at 47,09x HDMI-1 read a valid EDID again (47,095), so HPD `cur`
-        #     equalled `_prev_connected` and `removed` was empty. Only the dark CRTC
+        #     equalled `_prev_present` and `removed` was empty. Only the dark CRTC
         #     distinguishes the state.
         #
         # It also correctly STOPS the coordinator recording an unplug whose CRTC the apply
         # has not torn down yet: dwm still has that monitor and has not evacuated, so
         # recording would produce records for windows that were never displaced.
         cur = {name for name, o in outs.items() if o.is_lit}
-        if self._prev_connected is None:
-            self._prev_connected = cur
+        if self._prev_present is None:
+            self._prev_present = cur
             self._snapshot = self._safe_capture(logger)
             logev(logger, logging.INFO, "relocate_seed",
-                  "seeded steady-state baseline", connected=len(cur), windows=len(self._snapshot))
+                  # WR-04: `present` (live CRTC), NOT `connected` (HPD). Logging
+                  # `connected=1` for a CRTC count sent the last investigation
+                  # looking at HPD state.
+                  "seeded steady-state baseline", present=len(cur),
+                  windows=len(self._snapshot))
             return
-        removed = self._prev_connected - cur
-        returned = cur - self._prev_connected
-        self._prev_connected = cur
+        removed = self._prev_present - cur
+        returned = cur - self._prev_present
+        self._prev_present = cur
         if removed:
             self._record_displaced(removed, logger)
         if returned:

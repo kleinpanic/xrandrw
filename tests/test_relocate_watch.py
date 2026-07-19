@@ -590,7 +590,7 @@ def test_replug_bounce_live_path_recovers_windows(bounce, logger):
     #
     # FIDELITY GUARD: HPD comes back UP before this apply's SETTLE (live 44,79x /
     # 47,095 reads a valid EDID again) while the CRTC stays dark. An HPD-based
-    # `cur` therefore equals `_prev_connected` and yields NO removal edge -- only
+    # `cur` therefore equals `_prev_present` and yields NO removal edge -- only
     # the dark CRTC distinguishes the state. Without this the test could pass for
     # the wrong reason.
     reader.arm(0, lambda: world.hpd("HDMI-1", True))

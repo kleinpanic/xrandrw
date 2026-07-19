@@ -123,7 +123,7 @@ def _assert_zero_interaction(coord, reader, control, capture, calls):
         "gate-off must drive ZERO window control"
     assert capture.calls == 0, "gate-off must never capture windows"
     assert coord._displaced == {}, "gate-off must not record any displaced window"
-    assert coord._prev_connected is None, "gate-off must return before seeding baseline"
+    assert coord._prev_present is None, "gate-off must return before seeding baseline"
 
 
 def test_gate_off_no_socket_is_complete_noop(monkeypatch, logger):

@@ -195,7 +195,7 @@ def test_full_lifecycle_records_and_restores_floating(tmp_path, monkeypatch, log
             xreader=_fake_xreader({A: PID_A, B: PID_B}),
             sock_path=str(sock), proc_root=proc_root)
 
-        # 1. BOOT SEED (all connected): seeds _prev_connected + _snapshot only.
+        # 1. BOOT SEED (all connected): seeds _prev_present + _snapshot only.
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._snapshot
         assert coord._snapshot[(PID_A, ST_A)].output == "DP-2"
@@ -322,7 +322,7 @@ def test_gate_unavailable_is_complete_noop(tmp_path, monkeypatch, logger):
             xreader=_fake_xreader({A: PID_A}),
             sock_path=str(sock), proc_root=proc_root)
         coord.on_settled({}, logger)
-        assert coord._prev_connected is None
+        assert coord._prev_present is None
         assert coord._snapshot == {}
         assert coord._displaced == {}
 

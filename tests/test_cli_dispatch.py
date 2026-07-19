@@ -170,10 +170,10 @@ def test_event_source_from_env_toggles(monkeypatch):
 
 def test_seeded_coordinator_seed_fail_is_swallowed(monkeypatch, logger, caplog):
     # on_settled raising must be caught (relocate_seed_fail) and not propagate; the
-    # returned coordinator still logs relocate_seed_deferred (_prev_connected None).
+    # returned coordinator still logs relocate_seed_deferred (_prev_present None).
     class BoomCoordinator:
         def __init__(self, *, config_enabled=None, ipc_timeout=None):
-            self._prev_connected = None
+            self._prev_present = None
 
         def on_settled(self, env, logger):
             raise RuntimeError("ipc blew up")
@@ -185,7 +185,7 @@ def test_seeded_coordinator_seed_fail_is_swallowed(monkeypatch, logger, caplog):
     with caplog.at_level(logging.INFO, logger="xrandrw.test_cli_dispatch"):
         coord = cli._seeded_coordinator({"WINDOW_MANAGEMENT": "1"}, logger, retries=1, delay=0)
 
-    assert coord._prev_connected is None
+    assert coord._prev_present is None
     events = {getattr(r, "event", None) for r in caplog.records}
     assert "relocate_seed_fail" in events
     assert "relocate_seed_deferred" in events
@@ -196,7 +196,7 @@ def test_seeded_coordinator_wait_breaks_on_stop_event(monkeypatch, logger):
     # breaks immediately (no further sleeps) rather than burning the full budget.
     class Coord:
         def __init__(self, *, config_enabled=None, ipc_timeout=None):
-            self._prev_connected = None
+            self._prev_present = None
 
         def on_settled(self, env, logger):
             pass

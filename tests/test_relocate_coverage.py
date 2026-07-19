@@ -98,7 +98,7 @@ def test_on_settled_read_fail_degrades(monkeypatch, caplog, logger):
     with caplog.at_level(logging.WARNING, logger="xrandrw"):
         coord.on_settled({}, logger)
     assert _has(caplog, "relocate_read_fail")
-    assert coord._prev_connected is None  # returned before seeding
+    assert coord._prev_present is None  # returned before seeding
 
 
 # --- _safe_capture: a failed capture keeps the previous snapshot -------------

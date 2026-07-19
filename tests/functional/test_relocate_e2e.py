@@ -263,7 +263,7 @@ def test_coordinator_on_settled_unplug_replug_injection(dwm_ipc):
 
         # 1. seed the steady-state baseline (both outputs connected).
         coord.on_settled(env={}, logger=_LOG)
-        assert coord._prev_connected == {_LEFT, _RIGHT}
+        assert coord._prev_present == {_LEFT, _RIGHT}
         assert coord._snapshot, "seed capture found no windows on the real socket"
 
         # 2. unplug the RIGHT output -> the window's record becomes displaced.

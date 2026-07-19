@@ -102,9 +102,9 @@ def _seeded_coordinator(env: dict[str, str], logger: logging.Logger,
     # BOOT-SEED (B2): construct the relocation coordinator and seed it ONCE while
     # all outputs are still connected (after boot apply, before watch_loop). The
     # watch hook fires only AFTER a topology CHANGE settles, so without this seed
-    # the FIRST unplug of the session takes on_settled's `_prev_connected is None`
+    # the FIRST unplug of the session takes on_settled's `_prev_present is None`
     # branch (seed + return, no `removed`), silently missing the first unplug so
-    # replug restores nothing. Seeding here populates _prev_connected + _snapshot
+    # replug restores nothing. Seeding here populates _prev_present + _snapshot
     # with the correct pre-unplug placement.
     # WM-07: the feature is opt-in. config_enabled ANDs with dwmipc.available()
     # inside the coordinator's _enabled() gate, so config-off => the whole
@@ -113,7 +113,7 @@ def _seeded_coordinator(env: dict[str, str], logger: logging.Logger,
     coordinator = RelocationCoordinator(config_enabled=config_enabled,
                                         ipc_timeout=_RELOCATE_IPC_TIMEOUT)
     # WR-03: if dwm-ipc isn't up yet at boot, on_settled is a silent no-op
-    # (_enabled() False) and _prev_connected stays None -- a LATER settle would
+    # (_enabled() False) and _prev_present stays None -- a LATER settle would
     # then seed off an ALREADY-REDUCED topology, silently reintroducing the B2
     # first-unplug miss. Wait a BOUNDED time for the endpoint before seeding.
     # WM-07 lean-boot: only run the wait when the feature is enabled. A disabled
@@ -133,7 +133,7 @@ def _seeded_coordinator(env: dict[str, str], logger: logging.Logger,
     except Exception as e:
         logev(logger, logging.WARNING, "relocate_seed_fail",
               "relocation seed failed; continuing without a seeded baseline", error=str(e))
-    if coordinator._prev_connected is None:
+    if coordinator._prev_present is None:
         # dwm-ipc never came up (or feature disabled): accept and continue. The
         # first unplug this session may not be restorable, but display layout is
         # unaffected and later cycles still self-heal once dwm-ipc is present.
