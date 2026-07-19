@@ -80,10 +80,68 @@ def test_match_no_geometry_match_is_none(logger, caplog):
     assert any(getattr(r, "event", None) == "window_monitor_unmatched" for r in caplog.records)
 
 
-def test_match_disconnected_output_never_matched(logger):
+def test_match_unplugged_but_lit_output_is_named(logger):
+    # INVERTED at 14-08 (was test_match_disconnected_output_never_matched, which
+    # asserted {0: None}). An output whose HPD has dropped but whose CRTC is STILL
+    # LIT is exactly the live 04:21:43,109 state: it is still driving pixels and dwm
+    # still has that monitor, so it MUST be nameable. Refusing to name it captured
+    # all three windows with output=None, and _record_displaced can never move a
+    # record whose output is None -> the windows were stranded.
+    #
+    # Decision D of 09-CONTEXT ("never guess-associate") is NARROWED, not dropped:
+    # `connected` is now a TIE-BREAK applied only to a MULTI-match, so "guess" means
+    # an ambiguity that survives the tie-break. See the docstring on
+    # match_dwm_monitor_to_output and .planning/debug/relocate-replug-bounce.md.
     outs = {"DP-1": _out("DP-1", connected=False, mode=(1920, 1080), position=(0, 0))}
     mons = [_mon(0, 0, 0, 1920, 1080)]
+    assert match_dwm_monitor_to_output(mons, outs, logger=logger) == {0: "DP-1"}
+
+
+def test_match_dark_output_never_matched(logger):
+    # The DARK output is the one that must never be a tagmon target -- and it needs
+    # no special case: no CRTC means position is None, which can never equal a dwm
+    # monitor's integer origin.
+    outs = {"DP-1": _out("DP-1", connected=False, mode=None, position=None)}
+    mons = [_mon(0, 0, 0, 1920, 1080)]
     assert match_dwm_monitor_to_output(mons, outs, logger=logger) == {0: None}
+
+
+def test_match_mirror_pair_resolves_to_the_connected_output(logger):
+    # NON-REGRESSION for the tie-break, and its whole justification. A mirrored /
+    # cloned pair or a dock-port handover presents two outputs at the SAME origin
+    # and mode with one connected and one unplugged-but-lit. Today that binds to the
+    # connected one; a bare deletion of the `o.connected` conjunct would have made it
+    # candidates=2 -> None, WIDENING the mirroring failure from "both connected" to
+    # "either connected" on a MUTATING path (this feeds _tagmon_to_target).
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0)),
+        "HDMI-1": _out("HDMI-1", connected=False, mode=(1920, 1080), position=(0, 0)),
+    }
+    mons = [_mon(0, 0, 0, 1920, 1080)]
+    assert match_dwm_monitor_to_output(mons, outs, logger=logger) == {0: "DP-1"}
+
+
+def test_match_non_integer_geometry_is_never_coerced(logger):
+    # ASVS V5: monitor geometry crosses the untrusted dwm.sock boundary and Python's
+    # True == 1 would let a boolean coerce into a position match. Shape-check first.
+    outs = {"DP-1": _out("DP-1", mode=(1920, 1080), position=(1, 0))}
+    mons = [_mon(0, True, 0, 1920, 1080)]
+    assert match_dwm_monitor_to_output(mons, outs, logger=logger) == {0: None}
+
+
+def test_unmatched_event_carries_per_output_diagnostics(logger, caplog):
+    # The live failure had to be reconstructed from the ABSENCE of an EDID log line
+    # because this event carried only a candidate COUNT. Name and level are
+    # unchanged (existing assertions depend on both); the payload is enriched.
+    outs = {"DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0))}
+    mons = [_mon(0, 500, 500, 1024, 768)]
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_windows_capture"):
+        match_dwm_monitor_to_output(mons, outs, logger=logger)
+    rec = next(r for r in caplog.records
+               if getattr(r, "event", None) == "window_monitor_unmatched")
+    assert rec.levelno == logging.INFO
+    assert "DP-1" in rec.outputs and "conn" in rec.outputs
+    assert "(0, 0)" in rec.outputs and "(1920, 1080)" in rec.outputs
 
 
 def test_match_ambiguous_identical_geometry_is_none(logger, caplog):
@@ -423,6 +481,38 @@ def test_capture_client_monitor_not_in_mapping_leaves_output_none(tmp_path, monk
     assert recs[0].monitor_number == 7
     assert recs[0].output is None and recs[0].edid is None
     assert any(getattr(r, "event", None) == "window_monitor_unmapped"
+               for r in caplog.records)
+
+
+def test_capture_null_mapping_value_emits_an_event(tmp_path, monkeypatch, logger, caplog):
+    # 14-08: the `unmapped` branch above guards a MISSING key. A key that is PRESENT
+    # but holds a NULL value -- the exact shape of all three poisoned records in the
+    # live 04:21:43,109 capture -- used to be committed with output=None logging
+    # NOTHING at all, which is why the failure had to be reconstructed forensically.
+    _make_proc(tmp_path, 1234)
+    # Two CONNECTED outputs at identical geometry: a genuine mirror, unresolvable
+    # even after the tie-break, so the mapping holds {0: None}.
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="edidA"),
+        "DP-2": _out("DP-2", mode=(1920, 1080), position=(0, 0), edid="edidB"),
+    }
+    mons = [_mon(0, 0, 0, 1920, 1080, clients=[0x11])]
+
+    def client_for(xid, path=None, **kw):
+        return {"name": "app", "tags": 1, "monitor_number": 0,
+                "geometry": {"current": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "states": {"is_floating": False, "is_fullscreen": False}}
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", lambda path=None, **kw: mons)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw"):
+        recs = capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                               proc_root=str(tmp_path), hostname="localhost",
+                               sock_path="/x", logger=logger)
+    assert len(recs) == 1 and recs[0].output is None
+    assert any(getattr(r, "event", None) == "window_monitor_null_mapping"
                for r in caplog.records)
 
 

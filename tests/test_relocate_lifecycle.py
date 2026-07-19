@@ -76,16 +76,42 @@ def _rewrite_starttime(tmp_path, pid, comm, starttime):
     (d / "stat").write_text(f"{pid} ({comm}) " + " ".join(after) + "\n")
 
 
+# W1 geometry alignment: positions/modes MUST line up with the fake server's
+# per-monitor origins (num*1920, 1920x1080) or match_dwm_monitor_to_output
+# resolves to None and the tests could pass VACUOUSLY.
+_LIVE_GEOMETRY = {"DP-1": ((0, 0), (1920, 1080)), "DP-2": ((1920, 0), (1920, 1080))}
+_EDIDS = {"DP-1": "edA", "DP-2": "edB"}
+
+
 def _make_outputs():
-    # W1 geometry alignment: positions/modes MUST line up with the fake server's
-    # per-monitor origins (num*1920, 1920x1080) or match_dwm_monitor_to_output
-    # resolves to None and the test could pass VACUOUSLY.
     return {
-        "DP-1": Output(name="DP-1", connected=True, current_mode=(1920, 1080),
-                       position=(0, 0), edid_sha1="edA"),
-        "DP-2": Output(name="DP-2", connected=True, current_mode=(1920, 1080),
-                       position=(1920, 0), edid_sha1="edB"),
+        name: Output(name=name, connected=True, position=pos, current_mode=mode,
+                     edid_sha1=_EDIDS[name])
+        for name, (pos, mode) in _LIVE_GEOMETRY.items()
     }
+
+
+def _unplug(outs, name):
+    """Model a REAL unplug: HPD drops AND the apply's scrub darkens the CRTC.
+
+    Since 14-08 the coordinator's presence predicate is CRTC LIVENESS, not HPD
+    ``connected`` -- on the live replug-bounce trace HPD had already returned by
+    the settle while the CRTC was still dark, so no HPD edge existed to act on. A
+    fixture that clears ``connected`` but leaves ``current_mode`` set describes a
+    head that is STILL driving pixels, which dwm has not evacuated; that is not an
+    unplug. Darkening the CRTC is exactly what ``apply_once``'s ``scrub_stale``
+    does to a disconnected head, so this is the faithful post-apply state.
+    """
+    o = outs[name]
+    o.connected = False
+    o.position = None
+    o.current_mode = None
+
+
+def _replug(outs, name):
+    o = outs[name]
+    o.connected = True
+    o.position, o.current_mode = _LIVE_GEOMETRY[name]
 
 
 class FakeRandr:
@@ -177,12 +203,12 @@ def test_full_lifecycle_records_and_restores_floating(tmp_path, monkeypatch, log
 
         # 2. FIRST unplug DP-2: dwm evacuates A to monitor 0; A recorded displaced.
         _evacuate(orig_run, srv, sock, A)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced
 
         # 3. FIRST replug DP-2: A restored to monitor 1, tags 4, floating, geometry.
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         tagmon_before = sum(1 for e in events if e[0] == "cmd" and e[1] == "tagmon")
         coord.on_settled({}, logger)
 
@@ -230,9 +256,9 @@ def test_tiled_window_no_geometry_and_never_converted(tmp_path, monkeypatch, log
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, B)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         coord.on_settled({}, logger)
 
         assert _wait_for(lambda: srv.state(B)["monitor_number"] == 1)
@@ -262,14 +288,14 @@ def test_identity_mismatch_left_untouched(tmp_path, monkeypatch, logger):
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced
 
         # PID reused: starttime moved -> identity no longer matches the record.
         _rewrite_starttime(tmp_path, PID_A, "a", ST_A + 999)
         events.clear()
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         coord.on_settled({}, logger)
 
         # Left where dwm put it (monitor 0), dropped, and NO control call issued.
@@ -323,7 +349,7 @@ def test_one_window_failure_isolated(tmp_path, monkeypatch, logger):
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
         _evacuate(orig_run, srv, sock, B)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
 
@@ -336,7 +362,7 @@ def test_one_window_failure_isolated(tmp_path, monkeypatch, logger):
             return orig_get(win, path=path, **kw)
         monkeypatch.setattr(relocate.dwmipc, "get_dwm_client", get_spy)
 
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         coord.on_settled({}, logger)   # must not raise
 
         assert (PID_A, ST_A) not in coord._displaced   # A restored + dropped
@@ -364,7 +390,7 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)   # A now on monitor 0 (alongside the anchor)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
 
         # Make tagmon a no-op so A can never reach its target monitor -> giveup.
@@ -377,7 +403,7 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
             return real_run(name, *args, **kw)
         monkeypatch.setattr(relocate.dwmipc, "run_command", run_noop_tagmon)
 
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         with caplog.at_level(logging.WARNING, logger="xrandrw"):
             coord.on_settled({}, logger)
 
@@ -413,10 +439,10 @@ def test_tagmon_skipped_when_move_would_empty_source_monitor(tmp_path, monkeypat
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)   # A now the ONLY client on monitor 0
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         events.clear()
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         with caplog.at_level(logging.WARNING, logger="xrandrw"):
             coord.on_settled({}, logger)
 
@@ -460,7 +486,7 @@ def test_focus_confirmed_before_verb_under_lagged_select(tmp_path, monkeypatch, 
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)          # A now on monitor 0
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced
 
@@ -470,7 +496,7 @@ def test_focus_confirmed_before_verb_under_lagged_select(tmp_path, monkeypatch, 
         srv.set_select_lag(1)
         events.clear()
 
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         coord.on_settled({}, logger)
 
         # Restore landed on A (confirmed target), not the stale selection B.
@@ -514,7 +540,7 @@ def test_stop_evt_bails_restore_after_current_window(tmp_path, monkeypatch, logg
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
         _evacuate(orig_run, srv, sock, B)
-        outs["DP-2"].connected = False
+        _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
 
@@ -531,7 +557,7 @@ def test_stop_evt_bails_restore_after_current_window(tmp_path, monkeypatch, logg
             return orig_restore_one(rec, monitors, conn_to_mon, lg)
         monkeypatch.setattr(coord, "_restore_one", counting_restore_one)
 
-        outs["DP-2"].connected = True
+        _replug(outs, "DP-2")
         coord.on_settled({}, logger, stop_evt=stop_evt)
 
         # Exactly ONE window was restored; the other stays displaced for later.
@@ -561,7 +587,7 @@ def test_dead_displaced_record_evicted_on_steady_settle(tmp_path, monkeypatch, l
 
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
-        outs["DP-2"].connected = False           # DP-2 stays disconnected
+        _unplug(outs, "DP-2")           # DP-2 stays disconnected
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced
 

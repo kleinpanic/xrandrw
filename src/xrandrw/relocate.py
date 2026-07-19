@@ -340,7 +340,33 @@ class RelocationCoordinator:
             logev(logger, logging.WARNING, "relocate_read_fail",
                   "x read failed at settle; skipping relocation this cycle", error=str(e))
             return
-        cur = {name for name, o in outs.items() if o.connected}
+        # CRTC LIVENESS, not HPD `connected` (14-08). An output counts as PRESENT when
+        # it has a current mode -- i.e. it is still driving pixels, so dwm still has that
+        # monitor. This is the Phase-4.1 lesson already recorded at `xrandr.py`'s
+        # topology_hash ("A disconnected head whose CRTC is still lit ... must be visible
+        # to change detection or the daemon never heals it"): the watch layer learned it
+        # then; the relocation layer never did. See
+        # `.planning/debug/relocate-replug-bounce.md`.
+        #
+        # WHY THIS IS SUFFICIENT NOW AND WAS NOT BEFORE (an earlier plan revision rejected
+        # this change, correctly, for the PRE-reorder world):
+        #   * Pre-reorder, an --off and its paired --auto could land inside ONE apply_once.
+        #     Liveness was then unchanged across the single observation the coordinator
+        #     gets per apply, so no edge appeared and this predicate would not have fired.
+        #   * Post-reorder (see the scrub_stale comment in apply.py) scrub and placement
+        #     read the same snapshot, so that pairing cannot be constructed. An --off with
+        #     no matching --auto leaves the CRTC dark, and `cur` sees it. The reorder is
+        #     what makes this predicate sufficient; the two changes are load-bearing
+        #     TOGETHER and neither alone.
+        #   * HPD `connected` cannot substitute. On the live trace, by the post-apply
+        #     settle at 47,09x HDMI-1 read a valid EDID again (47,095), so HPD `cur`
+        #     equalled `_prev_connected` and `removed` was empty. Only the dark CRTC
+        #     distinguishes the state.
+        #
+        # It also correctly STOPS the coordinator recording an unplug whose CRTC the apply
+        # has not torn down yet: dwm still has that monitor and has not evacuated, so
+        # recording would produce records for windows that were never displaced.
+        cur = {name for name, o in outs.items() if o.current_mode is not None}
         if self._prev_connected is None:
             self._prev_connected = cur
             self._snapshot = self._safe_capture(logger)

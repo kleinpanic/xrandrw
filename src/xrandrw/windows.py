@@ -280,6 +280,31 @@ def resolve_pid(xid, reader, *, hostname: str | None = None,
 # Pure dwm-monitor <-> output geometry matcher (no X, no sockets, no dwm)
 # --------------------------------------------------------------------------
 
+def _geometry_int(value) -> bool:
+    """True iff ``value`` is a real int (bools rejected) fit to take part in a match.
+
+    Monitor geometry arrives over the untrusted ``dwm.sock`` boundary, and Python's
+    ``True == 1`` would let a boolean COERCE into a position/mode match. Shape-check
+    before comparing so malformed geometry fails to match instead (ASVS V5;
+    established validation precedent ``dwmipc.py:189-219``).
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _outputs_state_summary(outputs) -> str:
+    """Compact per-output ``conn|disc @ position / mode`` line for the unmatched log.
+
+    The live 04:21:43,109 failure had to be reconstructed forensically from the
+    ABSENCE of an EDID log line, because ``window_monitor_unmatched`` carried only a
+    candidate COUNT. This makes the deciding state self-evident in the journal.
+    """
+    return " ".join(
+        f"{name}:{'conn' if outputs[name].connected else 'disc'}"
+        f"@{outputs[name].position}/{outputs[name].current_mode}"
+        for name in sorted(outputs)
+    )
+
+
 def match_dwm_monitor_to_output(dwm_monitors, outputs,
                                 logger: logging.Logger | None = None):
     """Map each dwm ``monitor_number`` to an xrandrw connector by geometry.
@@ -287,11 +312,49 @@ def match_dwm_monitor_to_output(dwm_monitors, outputs,
     ``dwm_monitors`` is the validated ``get_monitors()`` list (each dict has
     ``num`` and ``monitor_geometry{x,y,width,height}``); ``outputs`` is the
     ``{connector: Output}`` mapping from ``RandRReader().read()``. For each
-    monitor, find the single CONNECTED output whose ``position == (mg.x, mg.y)``
-    AND ``current_mode == (mg.width, mg.height)``; map ``num -> connector``.
-    Zero or MORE-THAN-ONE matches map ``num -> None`` and log a
-    ``window_monitor_unmatched`` event with the raw geometry -- never
-    guess-associate (decision D of 09-CONTEXT).
+    monitor the PRIMARY filter is position and mode equality alone:
+    ``position == (mg.x, mg.y)`` AND ``current_mode == (mg.width, mg.height)``.
+    Exactly one match maps ``num -> connector``. MORE than one retries the filter
+    with ``o.connected`` added and accepts a unique result. Anything still
+    ambiguous, and zero matches, map ``num -> None`` and log a
+    ``window_monitor_unmatched`` event.
+
+    WHY ``o.connected`` IS A TIE-BREAK AND NOT A CONJUNCT (14-08). At
+    04:21:43,109 the live re-seed logged ``candidates=0`` and captured all three
+    windows with ``output=None``, because HDMI-1 was ``connected=False`` but STILL
+    LIT at (1920,0)/1600x900 from the 42,917 ``--auto``. Poisoned records can never
+    be recorded as displaced -- ``_record_displaced`` (``relocate.py:410-412``)
+    only moves records whose ``rec.output`` is in ``removed``, and ``None`` never
+    is -- so the windows were stranded. See
+    ``.planning/debug/relocate-replug-bounce.md``.
+
+    Simply DELETING the conjunct would have been wrong: it also excludes
+    candidates in the MULTI-MATCH direction. A mirrored/cloned pair, or a
+    dock/port handover, presents two outputs at the same origin and mode with one
+    connected and one unplugged-but-lit; today that is ``candidates=1`` and binds
+    correctly, and a bare deletion would turn it into ``candidates=2`` then
+    ``None``. The tie-break is strictly non-regressive there and keeps the
+    MUTATING path (this feeds ``conn_to_mon`` in ``_restore_returned``, which
+    selects ``target`` for ``_tagmon_to_target``) on high-confidence bindings.
+
+    WHY A UNIQUE UNPLUGGED-BUT-LIT MATCH IS SAFE TO HAND TO A MUTATING VERB: such
+    an output is still driving pixels and dwm still has that monitor, so a
+    ``tagmon`` toward it lands on a real, visible monitor. It is the DARK output
+    that must never be a target -- and a dark output has ``crtc=None`` hence
+    ``position=None``, which can never equal a dwm monitor's integer origin, so
+    the position check that remains already excludes it.
+
+    Decision D of 09-CONTEXT (never guess-associate) is NARROWED, not dropped:
+    "guess" now means an ambiguity that survives the tie-break.
+
+    RESIDUAL, documented so nobody reads this as having solved mirroring: a
+    genuine mirror with BOTH outputs connected at identical geometry remains
+    unresolvable and correctly returns ``None``. That is a refusal, not poison --
+    the downstream record carries ``output=None`` and is now logged
+    (``window_monitor_null_mapping``). It cannot arise on the target hardware,
+    where eDP-1 sits at (0,0)/1920x1200 and HDMI-1 at (1920,0)/1600x900.
+
+    PURE: no X, no sockets.
     """
     lg = logger or _LOG
     result: dict[int, str | None] = {}
@@ -300,17 +363,24 @@ def match_dwm_monitor_to_output(dwm_monitors, outputs,
         mg = mon.get("monitor_geometry") or {}
         want_pos = (mg.get("x"), mg.get("y"))
         want_mode = (mg.get("width"), mg.get("height"))
-        matches = [
-            name for name, o in outputs.items()
-            if o.connected and o.position == want_pos and o.current_mode == want_mode
-        ]
+        if all(_geometry_int(v) for v in want_pos + want_mode):
+            matches = [
+                name for name, o in outputs.items()
+                if o.position == want_pos and o.current_mode == want_mode
+            ]
+            if len(matches) > 1:
+                # Ambiguous on geometry alone -> prefer the connected candidate.
+                matches = [name for name in matches if outputs[name].connected]
+        else:
+            matches = []  # malformed geometry never matches (never coerced)
         if len(matches) == 1:
             result[num] = matches[0]
         else:
             result[num] = None
             logev(lg, logging.INFO, "window_monitor_unmatched",
                   "no confident single output match for dwm monitor",
-                  monitor=num, geometry=mg, candidates=len(matches))
+                  monitor=num, geometry=mg, candidates=len(matches),
+                  outputs=_outputs_state_summary(outputs))
     return result
 
 
@@ -489,6 +559,15 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # h
                 client_mnum = client["monitor_number"]
                 if client_mnum in mapping:
                     connector = mapping.get(client_mnum)
+                    if connector is None:
+                        # The key was PRESENT but held a NULL value -- the exact shape of
+                        # all three poisoned records in the live 04:21:43,109 capture. The
+                        # `unmapped` branch below only guards a MISSING key, so this record
+                        # used to be committed with output=None logging nothing at all.
+                        logev(lg, logging.INFO, "window_monitor_null_mapping",
+                              "monitor resolved to no confident output; "
+                              "recording window with output/edid unset",
+                              xid=xid, monitor=client_mnum)
                 else:
                     connector = None
                     logev(lg, logging.INFO, "window_monitor_unmapped",

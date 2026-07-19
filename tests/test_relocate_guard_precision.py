@@ -258,12 +258,19 @@ def test_last_window_on_external_now_restores_when_dest_absorbs(tmp_path, monkey
         srv.select(A)
         orig_run("tagmon", 1, path=str(sock))        # dwm evacuates A: mon1 -> mon0
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 0)
+        # A REAL unplug darkens the CRTC as well as dropping HPD -- that is what
+        # apply_once's scrub_stale does to a disconnected head, and since 14-08 the
+        # coordinator's presence predicate is CRTC liveness, not HPD `connected`.
         outs["DP-2"].connected = False
+        outs["DP-2"].position = None
+        outs["DP-2"].current_mode = None
         coord.on_settled({}, logger)                 # record A displaced
         assert (PID_A, ST_A) in coord._displaced
 
         events.clear()
         outs["DP-2"].connected = True
+        outs["DP-2"].position = (1920, 0)
+        outs["DP-2"].current_mode = (1920, 1080)
         with caplog.at_level(logging.WARNING, logger="xrandrw"):
             coord.on_settled({}, logger)             # restore A
 
