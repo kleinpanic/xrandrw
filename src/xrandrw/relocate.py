@@ -132,7 +132,7 @@ class RelocationControl:
             _safe_close(d)
 
     def configure_geometry(self, xid, geometry) -> bool:
-        """Absolute-position a FLOATING window via X ConfigureWindow.
+        """Position a FLOATING window via X ConfigureWindow (MONITOR-RELATIVE x/y).
 
         Restores a saved floating geometry ``{x,y,width,height}`` (spike 003:
         dwm honors the ConfigureWindow for floating clients). Returns True on
@@ -140,6 +140,14 @@ class RelocationControl:
         False (never raises). The coordinator only ever calls this for floating
         records -- tiled windows are re-tiled by dwm and never get a geometry
         write.
+
+        IMPORTANT: the ``x``/``y`` here must already be MONITOR-RELATIVE, not
+        absolute root coords. dwm's ``configurerequest`` is monitor-relative
+        (``c->x = c->mon->mx + ev->x``), so the coordinator converts the captured
+        ABSOLUTE geometry to target-monitor-relative via
+        :func:`to_monitor_relative_geometry` before calling this seam. Passing
+        absolute coords would double-shift (and overflow-center) the window on any
+        monitor whose origin > 0 -- the exact bug the L1 harness surfaced.
         """
         d = None
         try:
@@ -160,6 +168,48 @@ class RelocationControl:
 # --------------------------------------------------------------------------
 # Pure planning helpers (no I/O; unit-provable headless)
 # --------------------------------------------------------------------------
+
+def monitor_origin(monitors, num) -> tuple[int, int] | None:
+    """Return ``(x, y)`` origin of dwm monitor ``num`` from a get_monitors list.
+
+    ``monitors`` is the validated ``get_monitors()`` list (each dict carries
+    ``num`` + ``monitor_geometry{x,y,...}``). Returns the monitor's origin as a
+    ``(x, y)`` int tuple, or ``None`` when ``num`` is None, no monitor matches, or
+    the geometry lacks numeric ``x``/``y`` -- so the caller degrades (skip the
+    geometry write) rather than guessing an origin. PURE: no I/O.
+    """
+    if num is None:
+        return None
+    for m in monitors:
+        if m.get("num") == num:
+            mg = m.get("monitor_geometry") or {}
+            x, y = mg.get("x"), mg.get("y")
+            if isinstance(x, int) and isinstance(y, int):
+                return (x, y)
+            return None
+    return None
+
+
+def to_monitor_relative_geometry(geometry, origin) -> dict[str, int]:
+    """Convert an ABSOLUTE ``{x,y,width,height}`` to a MONITOR-RELATIVE one.
+
+    Capture stores dwm's absolute root coords (``get_dwm_client`` geometry is
+    absolute), but dwm's ``configurerequest`` is monitor-relative
+    (``c->x = c->mon->mx + ev->x``). To land a floating window back at its saved
+    absolute position we must send ``ev->x = abs_x - target_origin_x`` (dwm then
+    recomputes ``c->x = target_origin_x + ev->x = abs_x``). ``origin`` is the
+    ``(x, y)`` target monitor origin from :func:`monitor_origin`. Returns a NEW
+    dict; ``width``/``height`` pass through unchanged. Raises on malformed input
+    (missing keys / non-int) so the caller's guard turns it into a logged skip.
+    PURE: no I/O.
+    """
+    ox, oy = origin
+    return {
+        "x": int(geometry["x"]) - int(ox),
+        "y": int(geometry["y"]) - int(oy),
+        "width": int(geometry["width"]),
+        "height": int(geometry["height"]),
+    }
 
 def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> int | None:
     """Return the fewest-hop RELATIVE tagmon direction from ``cur_num`` to ``target_num``.
@@ -470,8 +520,23 @@ class RelocationCoordinator:
                     self._focus_and_confirm(rec.xid, logger)
                     dwmipc.run_command("togglefloating", path=self._path, timeout=self._ipc_timeout)
                 elif action.verb == "configure":
+                    origin = monitor_origin(monitors, target)
+                    if origin is None:
+                        # WM-08 fail-safe: without the target monitor origin we
+                        # cannot convert the absolute captured geometry to the
+                        # monitor-relative coords dwm's configurerequest expects,
+                        # so sending it would land the window wrong. Skip the
+                        # geometry restore (monitor/tag/floating already applied)
+                        # and log, never guess or crash.
+                        logev(logger, logging.WARNING, "relocate_geometry_skip",
+                              "target monitor origin unresolved; skipping floating "
+                              "geometry restore (window kept on target, geometry left "
+                              "as dwm placed it)",
+                              pid=rec.pid, xid=rec.xid, target=target)
+                        continue
+                    rel = to_monitor_relative_geometry(action.args, origin)
                     self._focus_and_confirm(rec.xid, logger)
-                    self._control.configure_geometry(rec.xid, action.args)
+                    self._control.configure_geometry(rec.xid, rel)
             except Exception as e:  # noqa: PERF203  # per-step guard is the WM-08 one-failure-never-aborts-window contract
                 # One failed step never aborts the window and never crashes.
                 logev(logger, logging.WARNING, "relocate_step_fail",

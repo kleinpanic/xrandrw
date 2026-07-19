@@ -189,7 +189,14 @@ def test_full_lifecycle_records_and_restores_floating(tmp_path, monkeypatch, log
         st = srv.state(A)
         assert st["tags"] == 4
         assert st["is_floating"] is True
-        assert (A, dict(GA)) in control.configured
+        # Geometry is restored MONITOR-RELATIVE: dwm's configurerequest is
+        # c->x = c->mon->mx + ev->x, so the coordinator subtracts the TARGET
+        # monitor origin (DP-2 == dwm monitor 1 @ (1920,0)) from the captured
+        # ABSOLUTE geometry (GA.x=1930) before ConfigureWindow. ev->x=10 makes dwm
+        # recompute c->x = 1920+10 = 1930 (the saved absolute pos). Pre-fix it sent
+        # absolute 1930 and dwm double-shifted it to 1920+1930 -> off-screen/centered.
+        assert (A, {"x": GA["x"] - 1920, "y": GA["y"] - 0,
+                    "width": GA["width"], "height": GA["height"]}) in control.configured
         # W1 non-vacuous: a real tagmon verb was issued during restore.
         tagmon_after = sum(1 for e in events if e[0] == "cmd" and e[1] == "tagmon")
         assert tagmon_after > tagmon_before

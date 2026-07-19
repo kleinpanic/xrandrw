@@ -190,7 +190,12 @@ def test_restore_one_togglefloating_and_step_fail_swallow(monkeypatch, caplog, l
 
     monkeypatch.setattr(relocate.dwmipc, "run_command", _raising_run)
     with caplog.at_level(logging.WARNING, logger="xrandrw"):
-        result = coord._restore_one(rec, monitors=[{}], conn_to_mon={"DP-1": 0}, logger=logger)
+        # monitor 0 origin (0,0): the monitor-relative transform is a no-op here,
+        # so the sent geometry equals the captured absolute geometry (see the
+        # cross-monitor case in test_relocate_lifecycle for a non-zero origin).
+        monitors = [{"num": 0,
+                     "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080}}]
+        result = coord._restore_one(rec, monitors=monitors, conn_to_mon={"DP-1": 0}, logger=logger)
     assert result == "drop"
     # tag + togglefloating run_command both raised and were swallowed per-step.
     assert _has(caplog, "relocate_step_fail")

@@ -205,14 +205,19 @@ def test_coordinator_record_then_restore_injection(dwm_ipc):
         assert bool(client["states"]["is_floating"]) is True
         assert client["tags"] == 1
         geo = client["geometry"]["current"]
-        # y is restored (both monitors share origin y=0). x is NOT asserted here:
-        # against real dwm, configurerequest is monitor-RELATIVE (c->x = m->mx +
-        # ev->x) yet RelocationControl.configure_geometry sends the ABSOLUTE saved
-        # x, so a floating restore onto a monitor with origin x>0 is offset/centered
-        # by dwm. That is a real latent cross-monitor bug in relocate/windows this
-        # harness SURFACED; fixing shipped behavior is out of scope for phase 14
-        # (14-CONTEXT) -- tracked as a finding in 14-01-SUMMARY.md for a follow-up.
-        assert abs(geo["y"] - rec.geometry["y"]) <= 4
+        # CROSS-MONITOR GEOMETRY CORRECTNESS (regression guard for the bug this L1
+        # harness surfaced): against real dwm, configurerequest is monitor-RELATIVE
+        # (c->x = c->mon->mx + ev->x), and the RIGHT monitor's origin is x=1920. The
+        # coordinator now converts the captured ABSOLUTE geometry (x=2015) to
+        # target-monitor-relative (2015-1920=95) before ConfigureWindow, so dwm
+        # recomputes c->x = 1920+95 = 2015 and the floating window lands back at its
+        # saved ABSOLUTE position on the non-origin monitor. Pre-fix it sent absolute
+        # 2015, dwm double-shifted to 1920+2015 -> overflow-centered on monitor 1
+        # (wrong). Both axes are now asserted (y origin is 0, x origin is 1920).
+        assert abs(geo["x"] - rec.geometry["x"]) <= 6, (
+            f"cross-monitor floating x wrong: got {geo['x']}, want ~{rec.geometry['x']} "
+            f"(monitor-relative transform regression)")
+        assert abs(geo["y"] - rec.geometry["y"]) <= 6
         # restored records are dropped from the displaced map.
         assert (pid, starttime) not in coord._displaced
     finally:
