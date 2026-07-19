@@ -390,6 +390,18 @@ def run_command(name: str, *args: int, path: str = DEFAULT_SOCK_PATH,
     error re-raised as :class:`DwmIpcUnavailable` (consistent single escape type),
     never a raw ``ValueError``. Returns the decoded result.
     """
+    # Phase-14 test-isolation backstop. run_command is the only MUTATING verb
+    # (tagmon/tag/togglefloating); a stray one on the live world-writable
+    # /tmp/dwm.sock SIGSEGV-crashed the developer's dwm. Under pytest
+    # (PYTEST_CURRENT_TEST is a pytest-only sentinel, never set in production),
+    # hard-refuse that path even if the block_live_dwm autouse fixture is bypassed.
+    # RuntimeError (not DwmIpcUnavailable) so graceful-degrade callers cannot
+    # silently swallow the violation — it surfaces loudly as a test failure.
+    if path == "/tmp/dwm.sock" and os.environ.get("PYTEST_CURRENT_TEST"):
+        raise RuntimeError(
+            "refusing to send dwm command to the live /tmp/dwm.sock under pytest "
+            "(Phase-14 test-isolation backstop)"
+        )
     try:
         int_args = [int(a) for a in args]
     except (TypeError, ValueError) as e:
