@@ -537,7 +537,7 @@ class RelocationCoordinator:
                     rel = to_monitor_relative_geometry(action.args, origin)
                     self._focus_and_confirm(rec.xid, logger)
                     self._control.configure_geometry(rec.xid, rel)
-            except Exception as e:  # noqa: PERF203  # per-step guard is the WM-08 one-failure-never-aborts-window contract
+            except Exception as e:  # per-step guard is the WM-08 one-failure-never-aborts-window contract
                 # One failed step never aborts the window and never crashes.
                 logev(logger, logging.WARNING, "relocate_step_fail",
                       "restore step failed; continuing", pid=rec.pid, verb=action.verb, error=str(e))

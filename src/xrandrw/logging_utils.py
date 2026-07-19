@@ -6,7 +6,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
 
 _LEVEL_MAP = {
     "none": logging.CRITICAL + 1,
@@ -36,7 +35,7 @@ class JsonFormatter(logging.Formatter):
             payload[k] = v
         return json.dumps(payload, separators=(",", ":"))
 
-def _setup_logging(env: Dict[str, str]) -> logging.Logger:
+def _setup_logging(env: dict[str, str]) -> logging.Logger:
     logger = logging.getLogger("xrandrw")
     logger.setLevel(_LEVEL_MAP.get(env["LOG_LEVEL"], logging.INFO))
     added = False
@@ -65,7 +64,7 @@ def _setup_logging(env: Dict[str, str]) -> logging.Logger:
         logger.addHandler(ch)
     return logger
 
-def _sanitize_extra(fields: Dict[str, object]) -> Dict[str, object]:
+def _sanitize_extra(fields: dict[str, object]) -> dict[str, object]:
     # Avoid reserved LogRecord attrs; prefix collisions with "field_"
     out = {}
     for k, v in fields.items():
@@ -84,7 +83,7 @@ def logev(logger: logging.Logger, level: int, event: str, msg: str, **fields):
     msg2 = msg + _kv(**fields)
     logger.log(level, msg2, extra={"event": event, **_sanitize_extra(fields)})
 
-def run(cmd: List[str], logger: Optional[logging.Logger] = None, check=False, capture=True, env=None) -> subprocess.CompletedProcess:
+def run(cmd: list[str], logger: logging.Logger | None = None, check=False, capture=True, env=None) -> subprocess.CompletedProcess:
     if logger and logger.isEnabledFor(logging.DEBUG):
         logger.debug("run: %s", shlex.join(cmd), extra={"event": "exec"})
     return subprocess.run(cmd, check=check, capture_output=capture, text=True, env=env)

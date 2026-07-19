@@ -4,7 +4,6 @@ import logging
 from collections import namedtuple
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from Xlib import X, display
 from Xlib.ext import randr
@@ -16,25 +15,25 @@ class Output:
     name: str
     connected: bool
     primary: bool = False
-    current_mode: Optional[Tuple[int, int]] = None
+    current_mode: tuple[int, int] | None = None
     # CRTC origin (x, y); None when the output has no CRTC. Additive (Phase 9,
     # WM-04) so dwm monitor_geometry can be matched by full position+size.
-    position: Optional[Tuple[int, int]] = None
-    modes: List[Tuple[int, int, float, str]] = field(default_factory=list)  # (w,h,rate,flags "*+")
-    edid_sha1: Optional[str] = None
+    position: tuple[int, int] | None = None
+    modes: list[tuple[int, int, float, str]] = field(default_factory=list)  # (w,h,rate,flags "*+")
+    edid_sha1: str | None = None
 
 # Plain struct the live RandRReader hands to the pure mapper (oid is the loop var, not on oi).
 _RROutput = namedtuple("_RROutput", "oid name connection crtc modes num_preferred")
 
-def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> Dict[str, Output]:
+def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> dict[str, Output]:
     modemap = {m.id: m for m in modes}
-    outs: Dict[str, Output] = {}
+    outs: dict[str, Output] = {}
     for oi in output_infos:
         ci = crtc_infos.get(oi.crtc) if oi.crtc else None
         current_mode = (ci.width, ci.height) if ci else None
         position = (ci.x, ci.y) if ci else None
         cur_mode_id = ci.mode if ci else 0
-        mode_tuples: List[Tuple[int, int, float, str]] = []
+        mode_tuples: list[tuple[int, int, float, str]] = []
         for i, mid in enumerate(oi.modes):
             # WR-02: a hotplug between the two RandR round-trips can leave the output
             # referencing a mode id absent from this snapshot; skip it rather than crash.
@@ -55,7 +54,7 @@ def randr_resources_to_outputs(output_infos, crtc_infos, modes, primary_id) -> D
         )
     return outs
 
-def edid_bytes_to_sha1(raw: bytes) -> Optional[str]:
+def edid_bytes_to_sha1(raw: bytes) -> str | None:
     if not raw:
         return None
     return hashlib.sha1(raw).hexdigest()
@@ -67,7 +66,7 @@ class RandRReader:
     connection on the calling thread (Pitfall 4).
     """
 
-    def read(self, logger: Optional[logging.Logger] = None) -> Dict[str, Output]:
+    def read(self, logger: logging.Logger | None = None) -> dict[str, Output]:
         d = self._open(logger)
         try:
             root = d.screen().root
@@ -87,7 +86,7 @@ class RandRReader:
         finally:
             d.close()
 
-    def version(self, logger: Optional[logging.Logger] = None) -> Tuple[int, int]:
+    def version(self, logger: logging.Logger | None = None) -> tuple[int, int]:
         d = self._open(logger)
         try:
             v = d.xrandr_query_version()
@@ -95,21 +94,21 @@ class RandRReader:
         finally:
             d.close()
 
-    def events_supported(self, logger: Optional[logging.Logger] = None) -> bool:
+    def events_supported(self, logger: logging.Logger | None = None) -> bool:
         # RandR < 1.5 never registers RRNotify subevents (randr.init gate) -> slow-poll only.
         return self.version(logger) >= (1, 5)
 
-    def _open(self, logger: Optional[logging.Logger]):
+    def _open(self, logger: logging.Logger | None):
         try:
             return display.Display()
         except Exception as e:
             logev(logger, logging.ERROR, "xlib_connect_fail", "cannot open X display", error=str(e))
             raise
 
-def read_xrandr(logger: logging.Logger) -> Dict[str, Output]:
+def read_xrandr(logger: logging.Logger) -> dict[str, Output]:
     return RandRReader().read(logger)
 
-def edid_sysfs_read(name: str) -> Optional[bytes]:
+def edid_sysfs_read(name: str) -> bytes | None:
     base = Path("/sys/class/drm")
     for p in base.glob(f"card*-{name}/edid"):
         try:
@@ -118,7 +117,7 @@ def edid_sysfs_read(name: str) -> Optional[bytes]:
             pass
     return None
 
-def read_edid_native(d, oid, atom) -> Optional[bytes]:
+def read_edid_native(d, oid, atom) -> bytes | None:
     # long_length is in 32-bit units: 128 units = 512 bytes covers 128/256-byte EDIDs.
     try:
         prop = d.xrandr_get_output_property(oid, atom, X.AnyPropertyType, 0, 128)
@@ -127,7 +126,7 @@ def read_edid_native(d, oid, atom) -> Optional[bytes]:
         return None
     return raw or None
 
-def read_edids(outs: Dict[str, Output], logger: logging.Logger) -> None:
+def read_edids(outs: dict[str, Output], logger: logging.Logger) -> None:
     # sysfs first, then native RandR EDID output-property
     for n, o in outs.items():
         if not o.connected:
@@ -165,7 +164,7 @@ def read_edids(outs: Dict[str, Output], logger: logging.Logger) -> None:
     finally:
         d.close()
 
-def topology_hash(logger: Optional[logging.Logger] = None) -> str:
+def topology_hash(logger: logging.Logger | None = None) -> str:
     outs = RandRReader().read(logger)
     parts = []
     for name in sorted(outs):

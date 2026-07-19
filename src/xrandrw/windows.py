@@ -399,7 +399,7 @@ def build_record(xid, identity, client, connector, edid) -> WindowRecord:
     )
 
 
-def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # noqa: C901  # hardened multi-branch capture pipeline; each branch is a documented degrade path (see docstring)
+def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # hardened multi-branch capture pipeline; each branch is a documented degrade path (see docstring)
                     hostname: str | None = None, sock_path: str | None = None,
                     timeout: float = dwmipc.DEFAULT_TIMEOUT,
                     logger: logging.Logger | None = None) -> list[WindowRecord]:

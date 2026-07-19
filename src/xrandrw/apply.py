@@ -5,7 +5,7 @@ import logging
 import os
 import socket
 import threading
-from typing import Dict, List, Protocol
+from typing import Protocol
 
 from xrandrw.logging_utils import run, wait_for_x, loge, logev
 from xrandrw.xrandr import Output, read_xrandr, read_edids
@@ -70,17 +70,17 @@ class NativeRandRBackend:
         self._warn("rotate_left_if_portrait", logger, connector=connector)
         xrandr_rotate_left_if_portrait(connector, o, logger)
 
-def get_apply_backend(env: Dict[str, str]) -> ApplyBackend:
+def get_apply_backend(env: dict[str, str]) -> ApplyBackend:
     if env.get("APPLY_BACKEND") == "native":
         return NativeRandRBackend()
     return SubprocessBackend()
 
-def reapply_wallpaper(env: Dict[str, str], logger: logging.Logger):
+def reapply_wallpaper(env: dict[str, str], logger: logging.Logger):
     # Thin delegator to the pluggable wallpaper dispatch (WALL-01). The name is kept so the
     # existing call sites and the mock_x monkeypatch continue to resolve here.
     apply_wallpaper(env, logger)
 
-def scrub_stale(outs: Dict[str, Output], logger: logging.Logger, backend: ApplyBackend = None):
+def scrub_stale(outs: dict[str, Output], logger: logging.Logger, backend: ApplyBackend = None):
     # Only power off disconnected heads; avoid pre-apply resets that blank active screens
     off = backend.output_off if backend is not None else xrandr_output_off
     for connector, o in outs.items():
@@ -88,15 +88,15 @@ def scrub_stale(outs: Dict[str, Output], logger: logging.Logger, backend: ApplyB
             off(connector, logger)
 
 # ---------------- external placement (shared by both primary branches) ----------------
-def _place_externals(st: Dict[str, dict], exts: List[Output], primary_name: str,
-                     default_side: str, backend: ApplyBackend, outs: Dict[str, Output],
+def _place_externals(st: dict[str, dict], exts: list[Output], primary_name: str,
+                     default_side: str, backend: ApplyBackend, outs: dict[str, Output],
                      logger: logging.Logger) -> None:
     # Shared placement policy for the internal-primary and no-internal branches (CI-04 dedup):
     # resolve each external's stable profile, maintain the newest-last attach_stack, then place
     # connectors newest-first relative to `primary_name`. WR-03: identical-EDID heads share one
     # profile id but must each get a connector placement; HARD-04: once four sides are filled the
     # next connector chains off the previously-placed external (place_chain), not the primary.
-    pid_by_output: Dict[str, str] = {}
+    pid_by_output: dict[str, str] = {}
     for o in exts:
         pid_by_output[o.name] = ensure_profile(o, st, logger, default_side)
 
@@ -110,7 +110,7 @@ def _place_externals(st: Dict[str, dict], exts: List[Output], primary_name: str,
 
     # newest-first order + WR-03 connector-expansion (each pid -> ALL its connectors)
     ordered_pids = list(reversed([pid for pid in attach_stack if pid in cur_pids]))
-    conns_by_pid: Dict[str, List[str]] = {}
+    conns_by_pid: dict[str, list[str]] = {}
     for name, pid in pid_by_output.items():
         conns_by_pid.setdefault(pid, []).append(name)
     ordered_conns = [c for pid in ordered_pids for c in sorted(conns_by_pid[pid])]
@@ -128,7 +128,7 @@ def _place_externals(st: Dict[str, dict], exts: List[Output], primary_name: str,
         backend.auto_pos(connector, rel_opt, anchor_connector, logger)
         backend.rotate_left_if_portrait(connector, outs[connector], logger)
 
-def apply_once(env: Dict[str, str], logger: logging.Logger, event_source: str = "manual") -> None:
+def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = "manual") -> None:
     lockfile = env["LOCKFILE"]
     # HARD-02: open the apply-lock with O_NOFOLLOW; a symlinked lock path (CWE-59) raises ELOOP.
     try:

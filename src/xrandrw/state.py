@@ -8,7 +8,6 @@ import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from xrandrw.xrandr import Output
 from xrandrw.logging_utils import logev
@@ -28,7 +27,7 @@ def _now() -> float:
 def _new_profile_id(seed: str) -> str:
     return hashlib.sha1(seed.encode()).hexdigest()[:16]
 
-def load_state() -> Dict[str, dict]:
+def load_state() -> dict[str, dict]:
     sp = state_path()
     try:
         if sp.is_file():
@@ -48,13 +47,13 @@ def _atomic_write_json(path: Path, obj) -> None:
             os.fsync(f.fileno())          # durability: data on disk before the rename
         os.replace(tmp, path)             # atomic swap on the same filesystem
     except BaseException:
-        try:
+        try:  # noqa: SIM105 - deliberate best-effort cleanup swallow (CLAUDE.md error-handling convention)
             os.unlink(tmp)                # don't leak the temp file on failure
         except OSError:
             pass
         raise
 
-def save_state(st: Dict[str, dict], path: Optional[Path] = None) -> None:
+def save_state(st: dict[str, dict], path: Path | None = None) -> None:
     if path is None:
         path = state_path()
     try:
@@ -82,19 +81,19 @@ def state_lock(lock_path):
     finally:
         os.close(fd)                     # closing the fd releases the flock
 
-def ident_keys(o: Output) -> List[str]:
+def ident_keys(o: Output) -> list[str]:
     keys = []
     if o.edid_sha1:
         keys.append("edid:" + o.edid_sha1)
     keys.append("conn:" + o.name)
     return keys
 
-def ensure_profile(o: Output, st: Dict[str, dict], logger: logging.Logger, default_side: str) -> str:
+def ensure_profile(o: Output, st: dict[str, dict], logger: logging.Logger, default_side: str) -> str:
     imap = st.setdefault("identity_map", {})
     profs = st.setdefault("profiles", {})
     keys = ident_keys(o)
     targets = [imap[k] for k in keys if k in imap]
-    target: Optional[str] = None
+    target: str | None = None
     if targets:
         target = targets[0]
         # merge if multiple profiles map
@@ -134,5 +133,5 @@ def ensure_profile(o: Output, st: Dict[str, dict], logger: logging.Logger, defau
     p["last_seen"] = _now()
     return target
 
-def get_profile(st: Dict[str, dict], pid: str) -> dict:
+def get_profile(st: dict[str, dict], pid: str) -> dict:
     return st["profiles"].setdefault(pid, {})

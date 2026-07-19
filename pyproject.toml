@@ -38,6 +38,16 @@ where = ["src"]
 line-length = 110
 target-version = "py39"
 
+[tool.ruff.lint.per-file-ignores]
+# CI-04: the widened lint-strict gate (B,SIM,PERF,C90,UP,RUF over all of src/xrandrw/)
+# surfaces a few knowingly-accepted complexity/perf hits that this test/lint hardening
+# phase deliberately does NOT refactor. Suppressed via config (NOT inline `# noqa`) so the
+# behavior-safe `--select UP,RUF,SIM` autofix probe stays RUF100-clean while the strict gate
+# treats these as accepted. Each is a documented, intentional design, not a latent defect.
+"src/xrandrw/state.py" = ["C901"]     # ensure_profile: identity-resolution + profile-merge policy
+"src/xrandrw/windows.py" = ["C901"]   # capture_windows: multi-branch capture pipeline, each branch a documented degrade path
+"src/xrandrw/xrandr.py" = ["PERF203"] # edid_sysfs_read: per-connector best-effort EDID read; each sysfs node fails independently
+
 [tool.vulture]
 # Dead-code gate. `frame` is the signal-handler's required second arg (signal API
 # contract), structurally unused — the only legitimate false positive.

@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from xrandrw.logging_utils import _LEVEL_MAP
 
@@ -25,8 +24,8 @@ ENV_DEFAULTS = {
     "WINDOW_MANAGEMENT": "0",              # 0=off (opt-in) / 1=enable dwm-ipc window relocation (WM-07)
 }
 
-def _load_env_file(path: Path) -> Dict[str, str]:
-    env: Dict[str, str] = {}
+def _load_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
     if not path.is_file():
         return env
     for line in path.read_text(errors="ignore").splitlines():
@@ -54,21 +53,21 @@ def resolve_lock_dir() -> Path:
     return d
 
 # Pure numeric guard: malformed config degrades to default instead of crashing (D-05).
-def _coerce_int(raw: str, default: str, minimum: int, use_float: bool = False) -> Tuple[int, Optional[str]]:
+def _coerce_int(raw: str, default: str, minimum: int, use_float: bool = False) -> tuple[int, str | None]:
     try:
         v = int(float(raw)) if use_float else int(raw)
         return max(minimum, v), None
     except (ValueError, TypeError):
         return max(minimum, int(default)), f"invalid value {raw!r}, using default {default!r}"
 
-def load_config() -> Tuple[Dict[str, str], List[str]]:
+def load_config() -> tuple[dict[str, str], list[str]]:
     env = dict(ENV_DEFAULTS)
     env.update(_load_env_file(CONF_SYS))
     env.update(_load_env_file(CONF_USER))
-    for k in ENV_DEFAULTS.keys():
+    for k in ENV_DEFAULTS:
         if k in os.environ:
             env[k] = os.environ[k]
-    warnings: List[str] = []
+    warnings: list[str] = []
 
     def coerce(key: str, minimum: int, use_float: bool = False) -> str:
         v, w = _coerce_int(env[key], ENV_DEFAULTS[key], minimum, use_float)

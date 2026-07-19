@@ -5,7 +5,6 @@ import select
 import signal
 import threading
 import time
-from typing import Dict
 
 from Xlib import display
 from Xlib.ext import randr
@@ -24,7 +23,7 @@ def _install_signals(logger: logging.Logger):
     signal.signal(signal.SIGINT, _sig)
     signal.signal(signal.SIGTERM, _sig)
 
-def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
+def _apply_if_changed(env: dict[str, str], logger: logging.Logger,
                       last_hash: str, churn: dict, got_event: bool, coordinator=None) -> str:
     # Decision logic isolated from the blocking select() so it is unit-testable
     # with topology_hash/apply_once mocked and no live Display.
@@ -68,7 +67,7 @@ def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
                   "relocation hook raised; ignoring (display layout unaffected)", error=str(e))
     return settled
 
-def watch_loop(env: Dict[str, str], logger: logging.Logger, coordinator=None):
+def watch_loop(env: dict[str, str], logger: logging.Logger, coordinator=None):
     slow_poll = int(env["POLL_INTERVAL"])  # D-06: safety-net timeout, not a tight loop
     churn = {
         "times": [],
@@ -110,7 +109,7 @@ def watch_loop(env: Dict[str, str], logger: logging.Logger, coordinator=None):
         while not stop_evt.is_set():
             r, _, _ = select.select([xfd, rpipe], [], [], slow_poll)
             if rpipe in r:
-                try:
+                try:  # noqa: SIM105 - deliberate best-effort drain swallow (CLAUDE.md error-handling convention)
                     os.read(rpipe, 64)  # drain; _install_signals already set stop_evt
                 except BlockingIOError:
                     pass

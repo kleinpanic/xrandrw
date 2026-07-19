@@ -2,7 +2,6 @@ from __future__ import annotations
 import logging
 import shutil
 from pathlib import Path
-from typing import Dict
 
 from Xlib import X, Xatom, display
 
@@ -19,7 +18,7 @@ except ImportError:  # pragma: no cover
     _HAVE_PIL = False
 
 
-def select_wallpaper_backend(env: Dict[str, str], has_xwallpaper: bool, has_fehbg: bool, has_feh: bool) -> str:
+def select_wallpaper_backend(env: dict[str, str], has_xwallpaper: bool, has_fehbg: bool, has_feh: bool) -> str:
     # Pure: configured engine wins, else auto-detect order, else native fallback (D-04/D-05).
     eng = env.get("WALLPAPER_ENGINE", "").strip().lower()
     if eng in ("feh", "fehbg", "xwallpaper", "native"):
@@ -33,7 +32,7 @@ def select_wallpaper_backend(env: Dict[str, str], has_xwallpaper: bool, has_fehb
     return "native"
 
 
-def apply_wallpaper(env: Dict[str, str], logger: logging.Logger):
+def apply_wallpaper(env: dict[str, str], logger: logging.Logger):
     wall = env["WALL"]
     backend = select_wallpaper_backend(
         env,
@@ -65,7 +64,7 @@ def apply_wallpaper(env: Dict[str, str], logger: logging.Logger):
         _native_wallpaper(env, logger)
 
 
-def _native_wallpaper(env: Dict[str, str], logger: logging.Logger):
+def _native_wallpaper(env: dict[str, str], logger: logging.Logger):
     if not _HAVE_PIL:
         logev(logger, logging.INFO, "wallpaper_native_skip",
               "native wallpaper needs the 'wallpaper' extra: pip install xrandrw[wallpaper]")

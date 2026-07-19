@@ -7,7 +7,6 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Dict, List
 
 from xrandrw import dwmipc
 from xrandrw.config import load_config
@@ -31,7 +30,7 @@ _SEED_DELAY = 0.5       # seconds between availability probes
 # each synchronous restore round-trip short so it cannot stall the watch loop.
 _RELOCATE_IPC_TIMEOUT = 0.25
 
-def set_pref(env: Dict[str, str], output_or_id: str, side: str, logger: logging.Logger):
+def set_pref(env: dict[str, str], output_or_id: str, side: str, logger: logging.Logger):
     if side not in SIDES_VALID:
         raise SystemExit(f"invalid side: {side} (valid: {', '.join(SIDES_VALID)})")
     outs = read_xrandr(logger)
@@ -41,7 +40,7 @@ def set_pref(env: Dict[str, str], output_or_id: str, side: str, logger: logging.
     # two-lock system acyclic (no process waits for the apply-lock while holding the state-lock).
     with state_lock(env["STATE_LOCKFILE"]):
         st = load_state()
-        matched: List[str] = []
+        matched: list[str] = []
         for o in outs.values():
             if not o.connected:
                 continue
@@ -61,7 +60,7 @@ def list_state():
     st = load_state()
     print(json.dumps(st, indent=2, sort_keys=True))
 
-def window_state(env: Dict[str, str], logger: logging.Logger) -> int:
+def window_state(env: dict[str, str], logger: logging.Logger) -> int:
     # WM-07 SC3: read-only diagnostic of the window-management feature state.
     # Degrades cleanly on every path (off / no-endpoint / available) and always
     # exits 0 -- never crashes. `displaced` is always [] here: this one-shot has
@@ -97,7 +96,7 @@ def _event_source_from_env() -> str:
         return "xplugd"
     return "manual"
 
-def _seeded_coordinator(env: Dict[str, str], logger: logging.Logger,
+def _seeded_coordinator(env: dict[str, str], logger: logging.Logger,
                         *, retries: int = _SEED_RETRIES,
                         delay: float = _SEED_DELAY) -> RelocationCoordinator:
     # BOOT-SEED (B2): construct the relocation coordinator and seed it ONCE while

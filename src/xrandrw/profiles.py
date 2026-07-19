@@ -1,6 +1,5 @@
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
 
 # ---------------- grammar ----------------
 
@@ -11,15 +10,15 @@ class OutputSpec:
     connector: str
     mode: str
     primary: bool
-    pos: Optional[Tuple[int, int]]
-    rel: Optional[Tuple[str, str]]
+    pos: tuple[int, int] | None
+    rel: tuple[str, str] | None
     scale: str = "1x1"
-    rotate: Optional[str] = None
+    rotate: str | None = None
 
 @dataclass
 class Profile:
     name: str
-    specs: List[OutputSpec]
+    specs: list[OutputSpec]
 
     @property
     def connectors(self) -> frozenset:
@@ -27,7 +26,7 @@ class Profile:
 
 # ---------------- parse ----------------
 
-def _parse_position(field: str) -> Tuple[Optional[Tuple[int, int]], Optional[Tuple[str, str]]]:
+def _parse_position(field: str) -> tuple[tuple[int, int] | None, tuple[str, str] | None]:
     if "=" in field:
         side, _, anchor = field.partition("=")
         if side not in SIDES or not anchor:
@@ -67,7 +66,7 @@ def _parse_spec(field: str) -> OutputSpec:
 
 # Degrade-to-None on any malformed spec (mirrors config._coerce_int degrade-to-default):
 # a bad conf line is skipped, never crashes the daemon.
-def parse_profile(name: str, spec_string: str) -> Optional[Profile]:
+def parse_profile(name: str, spec_string: str) -> Profile | None:
     try:
         specs = [_parse_spec(s) for s in spec_string.split(";") if s]
     except ValueError:
@@ -76,8 +75,8 @@ def parse_profile(name: str, spec_string: str) -> Optional[Profile]:
         return None
     return Profile(name=name, specs=specs)
 
-def parse_all_profiles(env: Dict[str, str]) -> List[Profile]:
-    profiles: List[Profile] = []
+def parse_all_profiles(env: dict[str, str]) -> list[Profile]:
+    profiles: list[Profile] = []
     for key, value in env.items():
         if not key.startswith("LAYOUT_"):
             continue
@@ -92,7 +91,7 @@ def parse_all_profiles(env: Dict[str, str]) -> List[Profile]:
 # Subset matching (WR-05) let a {DSI-1} profile fire with {DSI-1, HDMI-1} connected and
 # apply_once early-returned with HDMI-1 never configured. Tie-break on identical sets:
 # alphabetically-first profile name wins.
-def match_profile(connected: frozenset, profiles: List[Profile]) -> Optional[Profile]:
+def match_profile(connected: frozenset, profiles: list[Profile]) -> Profile | None:
     candidates = [p for p in profiles if p.connectors == connected]
     if not candidates:
         return None
@@ -100,7 +99,7 @@ def match_profile(connected: frozenset, profiles: List[Profile]) -> Optional[Pro
 
 # ---------------- argv ----------------
 
-def build_xrandr_argv(profile: Profile) -> List[str]:
+def build_xrandr_argv(profile: Profile) -> list[str]:
     argv = ["xrandr"]
     for s in profile.specs:
         argv += ["--output", s.connector]
