@@ -14,6 +14,7 @@ from xrandrw.xrandr import read_xrandr, read_edids
 from xrandrw.state import load_state, save_state, ensure_profile, get_profile, state_lock
 from xrandrw.apply import apply_once, _sd_notify, _watchdog_thread
 from xrandrw.watch import stop_evt, watch_loop, _install_signals
+from xrandrw.relocate import RelocationCoordinator
 
 SIDES_VALID = ("right-of", "left-of", "above", "below")
 
@@ -51,6 +52,24 @@ def _event_source_from_env() -> str:
     if os.getenv("ACTION") or os.getenv("OUTPUT"):
         return "xplugd"
     return "manual"
+
+def _seeded_coordinator(env: Dict[str, str], logger: logging.Logger) -> RelocationCoordinator:
+    # BOOT-SEED (B2): construct the relocation coordinator and seed it ONCE while
+    # all outputs are still connected (after boot apply, before watch_loop). The
+    # watch hook fires only AFTER a topology CHANGE settles, so without this seed
+    # the FIRST unplug of the session takes on_settled's `_prev_connected is None`
+    # branch (seed + return, no `removed`), silently missing the first unplug so
+    # replug restores nothing. Seeding here populates _prev_connected + _snapshot
+    # with the correct pre-unplug placement. It self-gates: on_settled is a silent
+    # no-op unless _enabled() (config AND dwmipc.available()), so a machine with no
+    # dwm-ipc endpoint is unaffected. Guarded so a seed fault never breaks boot.
+    coordinator = RelocationCoordinator()
+    try:
+        coordinator.on_settled(env, logger)
+    except Exception as e:
+        logev(logger, logging.WARNING, "relocate_seed_fail",
+              "relocation seed failed; continuing without a seeded baseline", error=str(e))
+    return coordinator
 
 def main():
     env, cfg_warnings = load_config()
@@ -93,7 +112,8 @@ def main():
         try:
             apply_once(env, logger, event_source="daemon_boot")
             _sd_notify("READY=1")  # harmless if Type=simple
-            watch_loop(env, logger)
+            coordinator = _seeded_coordinator(env, logger)
+            watch_loop(env, logger, coordinator=coordinator)
         finally:
             stop_evt.set()
         return 0
@@ -102,10 +122,11 @@ def main():
         wait_for_x(logger)
         # Initial apply so starting with already-plugged displays is handled
         apply_once(env, logger, event_source="watch_boot")
+        coordinator = _seeded_coordinator(env, logger)
         wd_thread = threading.Thread(target=_watchdog_thread, args=(stop_evt, logger), daemon=True)
         wd_thread.start()
         try:
-            watch_loop(env, logger)
+            watch_loop(env, logger, coordinator=coordinator)
         finally:
             stop_evt.set()
         return 0
