@@ -296,7 +296,7 @@ class RelocationCoordinator:
         if removed:
             self._record_displaced(removed, logger)
         if returned:
-            self._restore_returned(returned, outs, env, logger, stop_evt)
+            self._restore_returned(returned, outs, logger, stop_evt)
         if not removed:
             # Steady/return state = current good placements; keep snapshot fresh
             # and sweep dead displaced records so the map cannot leak unbounded.
@@ -356,7 +356,7 @@ class RelocationCoordinator:
                 logev(logger, logging.INFO, "relocate_record",
                       "recorded displaced window", pid=rec.pid, output=rec.output)
 
-    def _restore_returned(self, returned, outs, env, logger, stop_evt=None) -> None:
+    def _restore_returned(self, returned, outs, logger, stop_evt=None) -> None:
         """Restore displaced records whose output has returned; drop stale ones.
 
         Checks ``stop_evt`` at the head of the per-window loop (WR-01): a
