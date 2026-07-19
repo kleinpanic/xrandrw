@@ -6,6 +6,14 @@ it was FOR THE SAME PROCESS -- focus, tagmon back to the restored monitor, tag,
 floating-state, and (only for floating windows) the saved geometry. Tiled windows
 get monitor+tag+floating-state but NO geometry write and are NEVER converted.
 
+KNOWN LIMITATION (IN-03): ``is_fullscreen`` is CAPTURED into the record but is
+NOT restored. dwm exposes fullscreen via ``_NET_WM_STATE_FULLSCREEN``, but a
+correct headless-testable restore of that state could not be validated against
+the fake server + mocked Xlib this late in the phase, so it is intentionally
+omitted rather than shipped unverified. A window that was fullscreen on the
+removed output returns to its saved monitor/tag/floating-state/geometry but not
+its fullscreen flag. Tracked for a follow-up; documented in SECURITY.md.
+
 Besides the productionised :mod:`xrandrw.dwmipc` verbs, this module is the ONLY
 place in the codebase that MUTATES window state. The mutation surface is kept
 small and independently verifiable: the live-X mutations go through the thin,
