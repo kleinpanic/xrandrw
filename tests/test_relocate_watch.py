@@ -23,6 +23,7 @@ import xrandrw.relocate as relocate
 import xrandrw.watch as watch
 import xrandrw.windows as win_mod
 from xrandrw import dwmipc
+import xrandrw.xrandr as xr_mod
 from xrandrw.xrandr import Output, topology_hash_from_outputs, unhealed_outputs
 
 
@@ -710,16 +711,34 @@ def test_sustained_disconnect_still_powers_off(tmp_path, monkeypatch, logger):
     assert backend.autos == [], "a disconnected head is never placed"
 
 
-def test_topology_hash_from_outputs_is_pure(output_factory):
-    outs = {
-        "eDP-1": output_factory("eDP-1", current_mode=(1920, 1200), position=(0, 0)),
-        # Disconnected but STILL LIT: the state the whole defect turns on. It must
-        # be inside the digest or change detection never sees the head at all.
-        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900),
-                                 position=(1920, 0)),
-    }
+def test_topology_hash_from_outputs_is_pure(output_factory, monkeypatch):
+    """WR-05: prove BOTH halves of the name -- value-determinism AND no I/O.
+
+    The original version compared against ``dict(outs)``, a SHALLOW copy holding
+    the SAME Output objects, so the equality could not fail unless the impl read a
+    clock; and nothing asserted purity at all despite the name. Now the second map
+    is rebuilt from FRESH equal-valued objects, and ``RandRReader`` is booby-trapped
+    so constructing one fails the test.
+    """
+    def build():
+        return {
+            "eDP-1": output_factory("eDP-1", current_mode=(1920, 1200), position=(0, 0)),
+            # Disconnected but STILL LIT: the state the whole defect turns on. It
+            # must be inside the digest or change detection never sees the head.
+            "HDMI-1": output_factory("HDMI-1", connected=False,
+                                     current_mode=(1600, 900), position=(1920, 0)),
+        }
+
+    outs = build()
+
+    class _NoReader:
+        def __init__(self, *a, **kw):
+            raise AssertionError("topology_hash_from_outputs must perform NO I/O")
+    monkeypatch.setattr(xr_mod, "RandRReader", _NoReader)
+
     digest = topology_hash_from_outputs(outs)
-    assert digest == topology_hash_from_outputs(dict(outs)), "same map -> same digest"
+    assert digest == topology_hash_from_outputs(build()), (
+        "equal VALUES (distinct objects) -> same digest")
 
     dark = dict(outs)
     dark["HDMI-1"] = output_factory("HDMI-1", connected=False)
