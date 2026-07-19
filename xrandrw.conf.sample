@@ -63,3 +63,23 @@ PREF_DEFAULT_SIDE=right-of
 # Inspect the feature's live state with:  xrandrw --window-state
 # WINDOW_MANAGEMENT=1
 
+
+# Replug bounce hold-down (UX-02). A physical replug rarely presents one clean
+# connect edge: the connector typically drops AGAIN a moment after coming back. If
+# the daemon believes that second drop it powers the head off, dwm evacuates the
+# windows that had just been restored, and the self-heal drags them back — four
+# visible window movements for one replug instead of two.
+#
+# When a disconnect arrives within BOUNCE_SUSPECT_MS of the previous apply, the
+# daemon treats it as SUSPECT and re-reads the topology for up to
+# BOUNCE_HOLDDOWN_MS before acting. If the connector returns within that window,
+# the whole off/on cycle is suppressed and no window moves.
+#
+# The wait is asymmetric and gated on purpose: CONNECT edges are never delayed, and
+# a genuine unplug (observed 47–248 s after the previous apply, vs 0.2–1 s for a
+# bounce) falls outside the suspect window and is healed immediately with no added
+# latency. Raise BOUNCE_HOLDDOWN_MS if your cable still produces a double cycle;
+# lower BOUNCE_SUSPECT_MS if a real unplug ever feels sluggish.
+# Set BOUNCE_HOLDDOWN_MS=0 to disable the hold-down entirely.
+# BOUNCE_SUSPECT_MS=5000
+# BOUNCE_HOLDDOWN_MS=3000

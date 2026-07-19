@@ -22,6 +22,8 @@ ENV_DEFAULTS = {
     "EXCESS_WINDOW_SEC": "20",             # burst window
     "EXCESS_THRESHOLD": "4",               # applies within window -> warn+backoff
     "WINDOW_MANAGEMENT": "0",              # 0=off (opt-in) / 1=enable dwm-ipc window relocation (WM-07)
+    "BOUNCE_SUSPECT_MS": "5000",           # a disconnect this soon after an apply is bounce-SUSPECT (UX-02)
+    "BOUNCE_HOLDDOWN_MS": "3000",          # ...so re-read for this long before believing it; 0 disables
 }
 
 def _load_env_file(path: Path) -> dict[str, str]:
@@ -87,6 +89,9 @@ def load_config() -> tuple[dict[str, str], list[str]]:
         env["LOG_LEVEL"] = "notice"
     env["EXCESS_WINDOW_SEC"] = coerce("EXCESS_WINDOW_SEC", 5)
     env["EXCESS_THRESHOLD"] = coerce("EXCESS_THRESHOLD", 2)
+    # minimum 0 on BOTH: 0 is the documented kill-switch for the bounce hold-down (UX-02).
+    env["BOUNCE_SUSPECT_MS"] = coerce("BOUNCE_SUSPECT_MS", 0)
+    env["BOUNCE_HOLDDOWN_MS"] = coerce("BOUNCE_HOLDDOWN_MS", 0)
 
     if env["LOCKFILE"] == ENV_DEFAULTS["LOCKFILE"]:
         env["LOCKFILE"] = str(resolve_lock_dir() / "xrandrw.lock")

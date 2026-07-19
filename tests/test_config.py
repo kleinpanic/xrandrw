@@ -185,3 +185,27 @@ def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
     env2, _ = load_config()
     assert env2["LOCKFILE"] == "/custom/path/my.lock"
     assert env2["STATE_LOCKFILE"].endswith("xrandrw.state.lock")
+
+
+def test_bounce_holddown_defaults(isolated_config):
+    env, warnings = load_config()
+    assert warnings == []
+    assert int(env["BOUNCE_HOLDDOWN_MS"]) == 3000
+    assert int(env["BOUNCE_SUSPECT_MS"]) == 5000
+
+
+def test_bounce_holddown_malformed_degrades_to_default(monkeypatch, isolated_config):
+    # 4-step config contract: _coerce_int never raises, the warning is deferred and
+    # replayed by cli.py rather than crashing a daemon at startup.
+    monkeypatch.setenv("BOUNCE_HOLDDOWN_MS", "soon")
+    env, warnings = load_config()
+    assert any("BOUNCE_HOLDDOWN_MS" in w for w in warnings)
+    assert env["BOUNCE_HOLDDOWN_MS"] == config.ENV_DEFAULTS["BOUNCE_HOLDDOWN_MS"]
+
+
+def test_bounce_holddown_zero_is_preserved_as_killswitch(monkeypatch, isolated_config):
+    # minimum=0, not 1: 0 is the documented way to turn the hold-down off entirely.
+    monkeypatch.setenv("BOUNCE_HOLDDOWN_MS", "0")
+    env, warnings = load_config()
+    assert warnings == []
+    assert env["BOUNCE_HOLDDOWN_MS"] == "0"
