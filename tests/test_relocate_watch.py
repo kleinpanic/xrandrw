@@ -56,9 +56,11 @@ class SpyCoordinator:
         self.events = events
         self.raises = raises
         self.calls = 0
+        self.stop_evts = []
 
-    def on_settled(self, env, logger):
+    def on_settled(self, env, logger, stop_evt=None):
         self.calls += 1
+        self.stop_evts.append(stop_evt)
         self.events.append(("settle",))
         if self.raises:
             raise RuntimeError("coordinator boom")
@@ -138,6 +140,8 @@ def test_hook_fires_once_after_apply_on_change(monkeypatch, logger):
     assert coord.calls == 1, "coordinator runs exactly once per applied change"
     # Ordering: the settle hook fires AFTER apply_once.
     assert events == [("apply", "randr_event"), ("settle",)]
+    # WR-01: the watch loop threads its shutdown flag into the hook.
+    assert coord.stop_evts == [watch.stop_evt]
 
 
 def test_hook_not_called_on_wakeup_or_unchanged(monkeypatch, logger):

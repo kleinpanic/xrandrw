@@ -255,7 +255,7 @@ class RelocationCoordinator:
 
     # --- single watch entry point ------------------------------------------
 
-    def on_settled(self, env, logger) -> None:
+    def on_settled(self, env, logger, stop_evt=None) -> None:
         """Post-apply hook: record on unplug, restore on replug, seed on boot.
 
         A no-op unless :meth:`_enabled`. On the FIRST call (``_prev_connected``
@@ -264,6 +264,12 @@ class RelocationCoordinator:
         never lost. Thereafter a removed output moves last-snapshot records into
         ``_displaced``; a returned output restores same-identity records; a
         steady settle (no removal) refreshes the snapshot.
+
+        ``stop_evt`` (the watch-loop shutdown flag, WR-01) is threaded into the
+        synchronous restore so a SIGTERM during a slow per-window restore cycle
+        bails after the current window instead of running the whole batch (which
+        could delay shutdown by ``N_windows * per-window IPC`` while the watchdog
+        still reports healthy).
         """
         if not self._enabled():
             return
@@ -288,7 +294,7 @@ class RelocationCoordinator:
         if removed:
             self._record_displaced(removed, logger)
         if returned:
-            self._restore_returned(returned, outs, env, logger)
+            self._restore_returned(returned, outs, env, logger, stop_evt)
         if not removed:
             # Steady/return state = current good placements; keep snapshot fresh.
             self._snapshot = self._safe_capture(logger)
@@ -325,8 +331,14 @@ class RelocationCoordinator:
                 logev(logger, logging.INFO, "relocate_record",
                       "recorded displaced window", pid=rec.pid, output=rec.output)
 
-    def _restore_returned(self, returned, outs, env, logger) -> None:
-        """Restore displaced records whose output has returned; drop stale ones."""
+    def _restore_returned(self, returned, outs, env, logger, stop_evt=None) -> None:
+        """Restore displaced records whose output has returned; drop stale ones.
+
+        Checks ``stop_evt`` at the head of the per-window loop (WR-01): a
+        SIGTERM mid-cycle stops after the current window so shutdown is prompt
+        even against a slow-but-connected dwm; remaining windows stay displaced
+        for a later cycle.
+        """
         t0 = time.monotonic()
         dropped = skipped = 0
         # SINGLE whole-cycle abort: a DwmIpcUnavailable at cycle ENTRY means the
@@ -342,6 +354,11 @@ class RelocationCoordinator:
         mapping = match_dwm_monitor_to_output(monitors, outs, logger=logger)
         conn_to_mon = {conn: num for num, conn in mapping.items() if conn is not None}
         for key, rec in list(self._displaced.items()):
+            if stop_evt is not None and stop_evt.is_set():
+                logev(logger, logging.INFO, "relocate_cycle_interrupted",
+                      "shutdown requested mid-cycle; stopping after current window",
+                      dropped=dropped, skipped=skipped)
+                break
             if rec.output not in returned:
                 continue
             try:

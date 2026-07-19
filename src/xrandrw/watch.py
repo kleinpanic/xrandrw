@@ -60,7 +60,9 @@ def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
     # coordinator=None keeps the loop byte-for-byte identical for existing callers/tests.
     if coordinator is not None:
         try:
-            coordinator.on_settled(env, logger)
+            # WR-01: thread the shutdown flag so a SIGTERM during the synchronous
+            # restore cycle bails promptly instead of masking behind a slow dwm.
+            coordinator.on_settled(env, logger, stop_evt=stop_evt)
         except Exception as e:
             logev(logger, logging.WARNING, "relocate_hook_fail",
                   "relocation hook raised; ignoring (display layout unaffected)", error=str(e))

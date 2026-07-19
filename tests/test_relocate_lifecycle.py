@@ -11,6 +11,7 @@ one-window-failure isolation, bounded tagmon giveup, and the boot-seed baseline.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from types import SimpleNamespace
 
@@ -427,3 +428,52 @@ def test_focus_confirmed_before_verb_under_lagged_select(tmp_path, monkeypatch, 
         between = events[focus_before[-1] + 1:cmd_idx]
         assert any(e[0] == "monitors" for e in between), \
             "coordinator confirms selection (get_monitors) before issuing the verb"
+
+
+# ---------------------------------------------------------------------------
+# WR-01: a SIGTERM (stop_evt set) mid-cycle bails after the CURRENT window
+# instead of restoring the whole batch (prompt shutdown, no watchdog masking).
+# ---------------------------------------------------------------------------
+
+def test_stop_evt_bails_restore_after_current_window(tmp_path, monkeypatch, logger):
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A), (PID_B, "b", ST_B)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    # Two floating windows on DP-2 (monitor 1) -> both displaced by the unplug.
+    clients = [_client(A, 4, 1, GA, True), _client(B, 8, 1, GB, True)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A, B: PID_B}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        _evacuate(orig_run, srv, sock, B)
+        outs["DP-2"].connected = False
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
+
+        # Simulate SIGTERM arriving DURING the first window's restore: the moment
+        # a window is restored, stop_evt is set, so the loop must stop before the
+        # second window rather than draining the whole batch.
+        stop_evt = threading.Event()
+        restored = []
+        orig_restore_one = coord._restore_one
+
+        def counting_restore_one(rec, monitors, conn_to_mon, lg):
+            restored.append((rec.pid, rec.starttime))
+            stop_evt.set()
+            return orig_restore_one(rec, monitors, conn_to_mon, lg)
+        monkeypatch.setattr(coord, "_restore_one", counting_restore_one)
+
+        outs["DP-2"].connected = True
+        coord.on_settled({}, logger, stop_evt=stop_evt)
+
+        # Exactly ONE window was restored; the other stays displaced for later.
+        assert len(restored) == 1
+        still_displaced = [k for k in ((PID_A, ST_A), (PID_B, ST_B)) if k in coord._displaced]
+        assert len(still_displaced) == 1
