@@ -23,7 +23,7 @@ import xrandrw.relocate as relocate
 import xrandrw.watch as watch
 import xrandrw.windows as win_mod
 from xrandrw import dwmipc
-from xrandrw.xrandr import Output, topology_hash_from_outputs
+from xrandrw.xrandr import Output, topology_hash_from_outputs, unhealed_outputs
 
 
 class FakeDisplay:
@@ -304,6 +304,30 @@ class BounceWorld:
                 for n, o in self.outs.items()}
 
 
+# --------------------------------------------------------------------------
+# THE THREE HPD-RETURN REGIMES. Recovery is not a property of the fix alone; it
+# depends on WHEN the physical link comes back relative to watch.py's post-apply
+# `settled = topology_hash(...)` freeze. Naming them here so the distinction is
+# never lost again -- the original 14-08 harness could express only regime B and
+# nobody noticed, which is how the black-monitor regression shipped.
+#
+#   Regime A -- HPD returns DURING the apply (~2.3 s window; THE LIVE CASE).
+#       The bounce apply --off's the head; placement filters on the same read so
+#       there is no paired --auto; then HPD returns before the apply finishes.
+#       `settled` therefore absorbs `HDMI-1|True|None` -- connected but DARK, a
+#       STABLE digest. Pre-fix this short-circuited watch.py's `cur == last_hash`
+#       forever: no further apply, no restore, monitor BLACK. Injected via
+#       ScenarioBackend.after_output_off.
+#   Regime B -- HPD returns in the microsecond gap between the settled freeze and
+#       the coordinator's edge read. Recovers in 1 further apply + settle. This is
+#       the ONLY regime the original harness could produce (ScenarioReader.arm
+#       ticks on coordinator reads only). Effectively zero probability live.
+#   Regime C -- HPD returns after the settle read. Also recovers in 1 apply.
+#
+# A and B/C must BOTH end with the windows on monitor 1 AND the head LIT.
+# --------------------------------------------------------------------------
+
+
 class ScenarioBackend:
     """The two xrandr/dwm semantics the live log demonstrates, encoded explicitly.
 
@@ -320,8 +344,17 @@ class ScenarioBackend:
     ONLY via an explicit tagmon from the coordinator.
     """
 
-    def __init__(self, world):
+    def __init__(self, world, after_output_off=None):
         self.world = world
+        # HPD-TIMING INJECTION POINT (regime A). The ScenarioReader's `arm()` clock
+        # can only fire on COORDINATOR reads, because _wire_apply_seams patches
+        # apply_mod.read_xrandr and bypasses the reader entirely -- so the harness
+        # was structurally incapable of expressing "HPD returns DURING the apply",
+        # which is the LIVE ordering. This hook fires immediately after the --off
+        # completes, inside the apply, which is exactly where the physical link
+        # came back live (--off completed ~04:21:44,79x; read #2 at 44,845 already
+        # read a valid HDMI EDID). See the regime table above.
+        self.after_output_off = after_output_off
 
     def _light(self, connector):
         pos, mode = _LIVE_GEOMETRY[connector]
@@ -334,11 +367,12 @@ class ScenarioBackend:
         num = w.monitor_of(connector)
         w.outs[connector].position = None
         w.outs[connector].current_mode = None
-        if num is None:
-            return
-        for client in w.clients.values():
-            if client["monitor_number"] == num:
-                client["monitor_number"] = 0
+        if num is not None:
+            for client in w.clients.values():
+                if client["monitor_number"] == num:
+                    client["monitor_number"] = 0
+        if self.after_output_off is not None:
+            self.after_output_off(connector)
 
     def primary_scale(self, connector, scale, logger):
         self.world.ops.append(("primary_scale", connector))
@@ -490,6 +524,11 @@ def bounce(tmp_path, monkeypatch):
     monkeypatch.setattr(dwmipc, "run_command", dwm.run_command)
     monkeypatch.setattr(watch, "topology_hash",
                         lambda logger=None: topology_hash_from_outputs(world.outs))
+    # The connected-and-dark self-heal seam, over the same world. Reading the world
+    # directly (not through ScenarioReader) keeps the reader's `arm()` indices
+    # meaning what they say: one tick per COORDINATOR read.
+    monkeypatch.setattr(watch, "unhealed_connectors",
+                        lambda logger=None: unhealed_outputs(world.outs))
 
     xreader = SimpleNamespace(
         net_wm_pid=lambda xid: _LIVE_PROCS.get(int(xid), (None, None))[0],
@@ -511,7 +550,7 @@ def bounce(tmp_path, monkeypatch):
     monkeypatch.setattr(coord, "on_settled", counting_on_settled)
 
     return SimpleNamespace(world=world, coord=coord, reader=reader, dwm=dwm,
-                           settles=settles, env=_bounce_env(tmp_path))
+                           backend=backend, settles=settles, env=_bounce_env(tmp_path))
 
 
 def _churn():
@@ -820,3 +859,102 @@ def test_is_lit_is_the_one_liveness_definition(output_factory):
     world.outs["HDMI-1"].position = None
     world.outs["HDMI-1"].current_mode = None
     assert [o.name for o in world.lit()] == ["eDP-1"]
+
+
+# ---------------------------------------------------------------------------
+# REGIME A -- the live HPD ordering, and the connected-and-dark self-heal.
+# ---------------------------------------------------------------------------
+
+
+def test_regime_a_hpd_returns_during_apply_monitor_never_left_dark(bounce, logger, caplog):
+    """The verifier's probe, as a permanent test: HPD returns DURING the apply.
+
+    Pre-fix outcome (a REGRESSION vs pre-14-08, which at least left the monitor
+    working): `settled` absorbs `HDMI-1|True|None`, that digest is stable, the
+    watch loop short-circuits forever, HDMI-1 stays BLACK and the three windows
+    stay stranded on the laptop panel. The self-heal must break the short-circuit.
+    """
+    world, coord, reader, env = bounce.world, bounce.coord, bounce.reader, bounce.env
+    churn = _churn()
+
+    # STEP 1 -- boot seed at steady state; all three windows on HDMI-1 / monitor 1.
+    coord.on_settled(env, logger)
+
+    # STEP 2 -- the replug apply and its re-seed; HPD drops at the coordinator read.
+    reader.arm(1, lambda: world.hpd("HDMI-1", False))
+    last = watch._apply_if_changed(env, logger, "topology-before-the-replug",
+                                   churn, True, coord)
+    assert sorted(str(r.output) for r in coord._snapshot.values()) == ["HDMI-1"] * 3
+
+    # STEP 3 -- the bounce apply. REGIME A: the physical link returns DURING it,
+    # immediately after the --off, exactly as it did live. Placement already
+    # filtered HDMI-1 out (read #2 saw it disconnected), so NO --auto is issued and
+    # the head is left connected-and-DARK.
+    bounce.backend.after_output_off = lambda connector: world.hpd(connector, True)
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        last = watch._apply_if_changed(env, logger, last, churn, True, coord)
+
+    assert world.outs["HDMI-1"].connected is True
+    assert world.outs["HDMI-1"].is_lit is False, "regime A reproduced: connected but dark"
+    assert world.monitors_of_live_windows() == [0, 0, 0], "dwm evacuated all three"
+    assert len(coord._displaced) == 3, "the removal edge must still be recorded"
+
+    # THE FIX: a connected-and-dark head is a known-bad state, so the loop must NOT
+    # absorb the (stable) settled hash -- otherwise nothing ever runs again.
+    assert last != topology_hash_from_outputs(world.outs), (
+        "absorbing here strands the daemon: stable digest -> no further apply -> "
+        "monitor black forever")
+    assert any(getattr(r, "event", None) == "watch_unhealed" for r in caplog.records)
+
+    # STEP 4 -- the forced re-apply the un-absorbed hash guarantees. HDMI-1 is
+    # connected on both reads now, so it is placed and the CRTC lights.
+    bounce.backend.after_output_off = None
+    last = watch._apply_if_changed(env, logger, last, churn, True, coord)
+
+    assert world.outs["HDMI-1"].is_lit is True, "the monitor must not be left black"
+    final = {hex(xid): world.clients[xid]["monitor_number"] for xid in _LIVE_XIDS}
+    assert set(final.values()) == {1}, (
+        f"all three windows must be back on dwm monitor 1 (HDMI-1); got {final}")
+    # Healthy again -> the hash IS absorbed and the retry counter resets.
+    assert last == topology_hash_from_outputs(world.outs)
+    assert churn["unhealed"] == 0
+
+
+def test_unhealed_retries_are_bounded(bounce, logger, caplog):
+    """Hardware that refuses to light must not spin the loop forever."""
+    world, coord, env = bounce.world, bounce.coord, bounce.env
+    churn = _churn()
+    coord.on_settled(env, logger)
+
+    # A head that is connected but which every apply fails to light (dead cable,
+    # unsupported mode): the backend's --auto never takes effect.
+    world.outs["HDMI-1"].position = None
+    world.outs["HDMI-1"].current_mode = None
+    bounce.backend._light = lambda connector: None
+
+    last = "start"
+    with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        for _ in range(watch.UNHEALED_APPLY_LIMIT):
+            got = watch._apply_if_changed(env, logger, last, churn, True, coord)
+            assert got == last, "each attempt within the bound refuses to absorb"
+        # One past the bound: accept the state rather than re-apply forever.
+        final = watch._apply_if_changed(env, logger, last, churn, True, coord)
+
+    assert final == topology_hash_from_outputs(world.outs), "gives up and absorbs"
+    assert churn["unhealed"] == 0, "counter resets once the state is accepted"
+    assert any(getattr(r, "event", None) == "watch_unhealed_giveup"
+               for r in caplog.records)
+
+
+def test_unhealed_outputs_is_pure_and_names_only_connected_dark_heads(output_factory):
+    outs = {
+        "eDP-1": output_factory("eDP-1", current_mode=(1920, 1200), position=(0, 0)),
+        # connected but DARK -- the known-bad state
+        "HDMI-1": output_factory("HDMI-1", connected=True),
+        # disconnected AND dark -- idle connector, nothing to heal
+        "DP-1": output_factory("DP-1", connected=False),
+        # disconnected but LIT -- the OTHER defect; healed by the scrub, not here
+        "DP-2": output_factory("DP-2", connected=False, current_mode=(1600, 900),
+                               position=(1920, 0)),
+    }
+    assert unhealed_outputs(outs) == ["HDMI-1"]

@@ -207,5 +207,29 @@ def topology_hash_from_outputs(outs: dict[str, Output]) -> str:
             parts.append(f"{o.name}|{o.connected}|{o.current_mode}")
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()
 
+def unhealed_outputs(outs: dict[str, Output]) -> list[str]:
+    """Connectors that are CONNECTED but have NO live CRTC -- a KNOWN-BAD state.
+
+    The mirror image of the Phase-4.1 lesson above. ``topology_hash_from_outputs``
+    deliberately makes *disconnected-and-lit* visible to change detection so the
+    daemon heals it. The converse -- *connected-and-dark* -- became a reachable
+    RESTING state when the scrub moved below read #2 (14-08): if both reads see a
+    head disconnected, the apply issues ``--off`` and placement (which filters on
+    the same read) issues no matching ``--auto``, so the CRTC stays dark. If HPD
+    then returns DURING that apply -- the live ordering, a ~2.3 s window -- the
+    post-apply ``settled`` hash absorbs ``HDMI-1|True|None``. That digest is
+    STABLE, so the watch loop's ``cur == last_hash`` short-circuit fires forever:
+    no further apply, no ``returned`` edge, no restore, and the external monitor
+    stays BLACK. That is strictly worse than the stranded-windows bug being fixed
+    (pre-14-08 the same apply re-lit the head, so the monitor at least worked).
+
+    A hash is the wrong tool for a liveness invariant: hash STABILITY is exactly
+    the wrong signal when the state is known-bad. So this is an explicit
+    change-EQUIVALENT condition rather than an attempt to make the digest express
+    it. PURE: no I/O.
+    """
+    return sorted(name for name, o in outs.items() if o.connected and not o.is_lit)
+
+
 def topology_hash(logger: logging.Logger | None = None) -> str:
     return topology_hash_from_outputs(RandRReader().read(logger))

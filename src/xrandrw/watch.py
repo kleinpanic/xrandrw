@@ -10,10 +10,33 @@ from Xlib import display
 from Xlib.ext import randr
 
 from xrandrw.logging_utils import logev
-from xrandrw.xrandr import topology_hash
+from xrandrw.xrandr import RandRReader, topology_hash, unhealed_outputs
 from xrandrw.apply import apply_once, _sd_notify
 
 stop_evt = threading.Event()
+
+# How many consecutive re-applies we will spend trying to light a connected head
+# whose CRTC is dark, before accepting the state and absorbing the hash. Without a
+# bound, hardware that simply refuses to light (a dead cable, an unsupported mode)
+# would re-apply on every wakeup forever.
+UNHEALED_APPLY_LIMIT = 3
+
+
+def unhealed_connectors(logger: logging.Logger | None = None) -> list[str]:
+    """Live read of :func:`unhealed_outputs` -- the module seam tests patch.
+
+    Costs ONE extra RandR read, and only on the post-apply path (applies are rare
+    -- they need a topology change), so the steady-state slow-poll wakeup is
+    unaffected. A failed read returns [] rather than raising or guessing: an
+    UNKNOWN topology is not a known-bad one, and forcing re-applies off a read we
+    could not complete is how you build a spin loop.
+    """
+    try:
+        return unhealed_outputs(RandRReader().read(logger))
+    except Exception as e:
+        logev(logger, logging.DEBUG, "watch_unhealed_read_fail",
+              "could not read topology for the unhealed-state check", error=str(e))
+        return []
 
 def _install_signals(logger: logging.Logger):
     def _sig(sig, frame):
@@ -71,6 +94,12 @@ def _apply_if_changed(env: dict[str, str], logger: logging.Logger,
     # Absorb our own mutations: the apply's xrandr commands emit RandR events; re-read the
     # settled topology so the loop doesn't chase its own change into a redundant 2nd apply.
     settled = topology_hash(logger)
+    # Is the settled topology actually HEALTHY? A connected head with no CRTC is a
+    # known-bad RESTING state (see xrandr.unhealed_outputs) and its hash is stable,
+    # so absorbing `settled` here would short-circuit the loop forever and leave the
+    # monitor BLACK. Read it BEFORE the coordinator hook so the hook cannot perturb
+    # what we observed.
+    unhealed = unhealed_connectors(logger)
     # Phase-10 additive hook (WM-06/WM-08): the relocation coordinator runs ONLY on this
     # post-apply branch, AFTER the settled hash is frozen. It must NOT alter the returned
     # hash or add a second topology read (preserves the no-double-apply invariant), and a
@@ -84,6 +113,29 @@ def _apply_if_changed(env: dict[str, str], logger: logging.Logger,
         except Exception as e:
             logev(logger, logging.WARNING, "relocate_hook_fail",
                   "relocation hook raised; ignoring (display layout unaffected)", error=str(e))
+    if unhealed:
+        # NOTE the hook ran ABOVE this, deliberately. Unlike the `not applied` bail,
+        # here the apply COMPLETED and the topology is fully known -- known-BAD, but
+        # known. The displacement is real (the head went dark, dwm evacuated), so the
+        # `removed` edge MUST be recorded now; if we skipped the hook, the healing
+        # re-apply below would re-light the head and the following settle would see
+        # neither `removed` nor `returned`, and the windows would never come back.
+        # "Unconfirmed observation" (WR-01) and "confirmed bad state" are different
+        # things and get different treatment.
+        attempts = churn.get("unhealed", 0) + 1
+        churn["unhealed"] = attempts
+        if attempts <= UNHEALED_APPLY_LIMIT:
+            logev(logger, logging.WARNING, "watch_unhealed",
+                  "connected output has no CRTC after apply; forcing a re-apply",
+                  outputs=unhealed, attempt=attempts, limit=UNHEALED_APPLY_LIMIT)
+            # Do NOT absorb: returning the OLD hash keeps `cur != last_hash` on the
+            # next wakeup, so the loop re-applies and lights the head.
+            return last_hash
+        logev(logger, logging.WARNING, "watch_unhealed_giveup",
+              "output still has no CRTC after repeated applies; accepting state to "
+              "avoid a re-apply loop (monitor may stay dark until the next event)",
+              outputs=unhealed, attempts=attempts)
+    churn["unhealed"] = 0
     return settled
 
 def watch_loop(env: dict[str, str], logger: logging.Logger, coordinator=None):
