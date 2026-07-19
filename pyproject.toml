@@ -67,6 +67,35 @@ markers = [
   "functional: real Xephyr+Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm, ERRORs (not skips) on CI",
 ]
 
+[tool.mutmut]
+# TEST-06 mutation testing, scoped to the three window-mgmt modules. mutmut 3.6 keys only
+# (NO deprecated paths_to_mutate / tests_dir). B1 false-0-kill fix: the mutation runner MUST
+# run in a NON-editable venv (see ci/mutation_sanity_kill.sh) AND `pytest_add_cli_args` clears
+# the `pythonpath=["src"]` pytest override below, so pytest imports mutmut's mutated
+# `mutants/src` copy instead of the un-mutated editable source. Run nightly via
+# .github/workflows/mutation.yml, never per-PR.
+source_paths = ["src/xrandrw"]
+only_mutate = [
+    "src/xrandrw/dwmipc.py",
+    "src/xrandrw/windows.py",
+    "src/xrandrw/relocate.py",
+]
+also_copy = ["tests/"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_dwmipc_parse.py",
+    "tests/test_dwmipc_env.py",
+    "tests/test_dwmipc_fuzz.py",
+    "tests/test_dwmipc_transport.py",
+    "tests/test_dwmipc_api.py",
+    "tests/test_relocate_control.py",
+    "tests/test_relocate_coverage.py",
+    "tests/test_relocate_lifecycle.py",
+    "tests/test_windows_capture.py",
+    "tests/test_windows_identity.py",
+    "tests/test_mutation_kills.py",
+]
+pytest_add_cli_args = ["-o", "pythonpath="]
+
 [tool.coverage.run]
 # TEST-07 M5: `branch` is DELIBERATELY NOT set here. A global branch flag would turn
 # the scoped 3-module CI gate (dwmipc/windows/relocate, LINE-based) into a branch
