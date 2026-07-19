@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import socket
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from Xlib import X, display
 from Xlib.ext import res
@@ -176,16 +176,16 @@ def parse_starttime_from_stat(stat_text: str) -> int:
     return int(rest[19])
 
 
-def read_proc_comm(pid: int, proc_root: str = "/proc") -> "str | None":
+def read_proc_comm(pid: int, proc_root: str = "/proc") -> str | None:
     """Read ``<proc_root>/<pid>/comm`` (trailing newline stripped) or ``None``."""
     try:
-        with open(f"{proc_root}/{pid}/comm", "r") as f:
+        with open(f"{proc_root}/{pid}/comm") as f:
             return f.read().rstrip("\n")
     except OSError:
         return None
 
 
-def read_proc_cmdline(pid: int, proc_root: str = "/proc") -> "str | None":
+def read_proc_cmdline(pid: int, proc_root: str = "/proc") -> str | None:
     """Read ``<proc_root>/<pid>/cmdline`` with NUL separators turned into spaces.
 
     ``/proc/<pid>/cmdline`` is a NUL-separated (and NUL-terminated) argv blob.
@@ -202,7 +202,7 @@ def read_proc_cmdline(pid: int, proc_root: str = "/proc") -> "str | None":
 
 
 def read_proc_identity(pid: int, proc_root: str = "/proc",
-                       logger: "logging.Logger | None" = None) -> "tuple[int, int, str, str | None] | None":
+                       logger: logging.Logger | None = None) -> tuple[int, int, str, str | None] | None:
     """Return ``(pid, starttime, comm, cmdline)`` for ``pid`` or ``None`` (skip).
 
     ``comm`` and ``cmdline`` are read in the SAME open sequence as ``stat``, and
@@ -217,7 +217,7 @@ def read_proc_identity(pid: int, proc_root: str = "/proc",
     ethos).
     """
     try:
-        with open(f"{proc_root}/{pid}/stat", "r") as f:
+        with open(f"{proc_root}/{pid}/stat") as f:
             stat_text = f.read()
         starttime = parse_starttime_from_stat(stat_text)
         comm = read_proc_comm(pid, proc_root)
@@ -226,7 +226,7 @@ def read_proc_identity(pid: int, proc_root: str = "/proc",
         cmdline = read_proc_cmdline(pid, proc_root)
         # Re-read starttime in the same sequence: if the PID was recycled between
         # opens, field 22 changes -> the (pid, starttime) identity is invalid.
-        with open(f"{proc_root}/{pid}/stat", "r") as f:
+        with open(f"{proc_root}/{pid}/stat") as f:
             starttime_confirm = parse_starttime_from_stat(f.read())
         if starttime_confirm != starttime:
             raise ValueError("starttime changed between reads; pid reused")
@@ -238,9 +238,9 @@ def read_proc_identity(pid: int, proc_root: str = "/proc",
         return None
 
 
-def resolve_pid(xid, reader, *, hostname: "str | None" = None,
+def resolve_pid(xid, reader, *, hostname: str | None = None,
                 proc_root: str = "/proc",
-                logger: "logging.Logger | None" = None) -> "tuple[int, int, str, str | None] | None":
+                logger: logging.Logger | None = None) -> tuple[int, int, str, str | None] | None:
     """Resolve a dwm client window ``xid`` to LOCAL ``(pid, starttime, comm, cmdline)``.
 
     WM-03 entry point. ``_NET_WM_PID`` is the PRIMARY pid; XRes
@@ -282,7 +282,7 @@ def resolve_pid(xid, reader, *, hostname: "str | None" = None,
 # --------------------------------------------------------------------------
 
 def match_dwm_monitor_to_output(dwm_monitors, outputs,
-                                logger: "logging.Logger | None" = None):
+                                logger: logging.Logger | None = None):
     """Map each dwm ``monitor_number`` to an xrandrw connector by geometry.
 
     ``dwm_monitors`` is the validated ``get_monitors()`` list (each dict has
@@ -295,7 +295,7 @@ def match_dwm_monitor_to_output(dwm_monitors, outputs,
     guess-associate (decision D of 09-CONTEXT).
     """
     lg = logger or _LOG
-    result: "dict[int, str | None]" = {}
+    result: dict[int, str | None] = {}
     for mon in dwm_monitors:
         num = mon.get("num")
         mg = mon.get("monitor_geometry") or {}
@@ -332,28 +332,28 @@ class WindowRecord:
     pid: int
     starttime: int
     comm: str
-    cmdline: Optional[str]
-    output: Optional[str]
-    edid: Optional[str]
+    cmdline: str | None
+    output: str | None
+    edid: str | None
     monitor_number: int
     tags: int
     is_floating: bool
     is_fullscreen: bool
-    geometry: Dict[str, int]
+    geometry: dict[str, int]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return a JSON-safe dict (round-trips through ``from_dict``)."""
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, d: Dict[str, Any]) -> "WindowRecord":
+    def from_dict(cls, d: dict[str, Any]) -> WindowRecord:
         return cls(**d)
 
 
 _GEOMETRY_KEYS = ("x", "y", "width", "height")
 
 
-def _client_geometry(client: Dict[str, Any]) -> Dict[str, int]:
+def _client_geometry(client: dict[str, Any]) -> dict[str, int]:
     """Return the client's ``{x,y,width,height}`` from nested or flat geometry.
 
     Real dwm returns nested ``geometry.current`` (spike 001); some replies carry
@@ -401,9 +401,9 @@ def build_record(xid, identity, client, connector, edid) -> WindowRecord:
 
 
 def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
-                    hostname: Optional[str] = None, sock_path: Optional[str] = None,
+                    hostname: str | None = None, sock_path: str | None = None,
                     timeout: float = dwmipc.DEFAULT_TIMEOUT,
-                    logger: Optional[logging.Logger] = None) -> List[WindowRecord]:
+                    logger: logging.Logger | None = None) -> list[WindowRecord]:
     """Read-only capture pipeline: enumerate + resolve + capture + associate.
 
     Wires the whole WM-04 flow through injectable seams (production defaults
@@ -444,7 +444,7 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
         return []
     mapping = match_dwm_monitor_to_output(monitors, outs, logger=lg)
 
-    records: List[WindowRecord] = []
+    records: list[WindowRecord] = []
     for mon in monitors:
         mnum = mon.get("num")
         # Validate the clients shape defensively OUTSIDE the per-window try/except:

@@ -14,7 +14,6 @@ import pytest
 from xrandrw import dwmipc
 from xrandrw.dwmipc import (
     DwmIpcUnavailable,
-    GET_DWM_CLIENT,
     GET_MONITORS,
     MAGIC,
     decode_reply,

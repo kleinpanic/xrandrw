@@ -10,8 +10,6 @@ from __future__ import annotations
 import logging
 from types import SimpleNamespace
 
-import pytest
-
 import xrandrw.relocate as relocate
 from xrandrw.relocate import Action, RelocationControl, plan_restore, tagmon_direction
 

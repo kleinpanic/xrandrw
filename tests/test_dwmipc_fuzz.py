@@ -23,7 +23,6 @@ The plain-pytest run below does NOT depend on pytest-cov.
 """
 from __future__ import annotations
 
-import json
 import random
 import struct
 import time

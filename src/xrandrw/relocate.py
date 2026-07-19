@@ -162,7 +162,7 @@ class RelocationControl:
 # Pure planning helpers (no I/O; unit-provable headless)
 # --------------------------------------------------------------------------
 
-def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> "int | None":
+def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> int | None:
     """Return the fewest-hop RELATIVE tagmon direction from ``cur_num`` to ``target_num``.
 
     dwm's ``tagmon`` moves the selected client by a RELATIVE monitor delta
@@ -185,7 +185,7 @@ def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> "int | N
     return 1 if forward <= backward else -1
 
 
-def plan_restore(record, live) -> "list[Action]":
+def plan_restore(record, live) -> list[Action]:
     """Compute the ordered restore deltas for one displaced window (PURE, no I/O).
 
     ``record`` is a captured ``WindowRecord`` (or any object exposing
@@ -204,7 +204,7 @@ def plan_restore(record, live) -> "list[Action]":
     False) NEVER yields a ``configure`` and is NEVER toggled beyond restoring its
     saved state, so tiling is preserved and dwm re-tiles it.
     """
-    actions: "list[Action]" = []
+    actions: list[Action] = []
     target = live.target_monitor
     if target is not None and target != live.current_monitor:
         direction = tagmon_direction(live.current_monitor, target, live.n_monitors)
@@ -250,9 +250,9 @@ class RelocationCoordinator:
         # into EVERY dwmipc call below (including capture_windows via _safe_capture,
         # AUDIT-B). cli.py passes a modest override (_RELOCATE_IPC_TIMEOUT, IN-01).
         self._ipc_timeout = ipc_timeout
-        self._displaced: "dict[tuple[int, int], object]" = {}
-        self._snapshot: "dict[tuple[int, int], object]" = {}
-        self._prev_connected: "set[str] | None" = None
+        self._displaced: dict[tuple[int, int], object] = {}
+        self._snapshot: dict[tuple[int, int], object] = {}
+        self._prev_connected: set[str] | None = None
 
     @property
     def _path(self) -> str:
@@ -313,7 +313,7 @@ class RelocationCoordinator:
 
     # --- helpers -----------------------------------------------------------
 
-    def _safe_capture(self, logger) -> "dict[tuple[int, int], object]":
+    def _safe_capture(self, logger) -> dict[tuple[int, int], object]:
         """Capture the current placements keyed by (pid, starttime).
 
         On any failure log ``relocate_capture_fail`` and return the PREVIOUS

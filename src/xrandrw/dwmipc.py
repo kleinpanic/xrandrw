@@ -31,7 +31,8 @@ import socket
 import stat
 import struct
 import time
-from typing import Any, Iterable, Tuple, Union
+from typing import Any
+from collections.abc import Iterable
 
 from xrandrw.logging_utils import logev
 
@@ -130,7 +131,7 @@ def pack_header(mtype: int, payload_len: int) -> bytes:
     return _HDR.pack(MAGIC, payload_len, mtype)
 
 
-def parse_header(header: bytes) -> Tuple[int, int]:
+def parse_header(header: bytes) -> tuple[int, int]:
     """Validate a 12-byte DWM-IPC reply header and return ``(size, rtype)``.
 
     SEC-01 boundary. Raises :class:`DwmIpcUnavailable` (never ``struct.error``)
@@ -283,8 +284,8 @@ def _recvall(sock: socket.socket, n: int, deadline: float | None = None) -> byte
     return buf
 
 
-def request(mtype: int, payload: Union[bytes, str] = b"", *,
-            path: str = DEFAULT_SOCK_PATH, timeout: float = DEFAULT_TIMEOUT) -> Tuple[int, Any]:
+def request(mtype: int, payload: bytes | str = b"", *,
+            path: str = DEFAULT_SOCK_PATH, timeout: float = DEFAULT_TIMEOUT) -> tuple[int, Any]:
     """Send one DWM-IPC request and return ``(rtype, decoded_body)``.
 
     Opens a fresh ``AF_UNIX`` ``SOCK_STREAM`` per call, sets ``timeout`` BEFORE
@@ -345,7 +346,7 @@ def available(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT
         # request() returns (rtype, body); validate the body ([1]), not the tuple.
         validate_monitors(request(GET_MONITORS, path=path, timeout=timeout)[1])
         return True
-    except Exception as e:  # noqa: BLE001 -- the gate must swallow EVERYTHING
+    except Exception as e:
         logev(logger, logging.INFO, "dwmipc_unavailable",
               "dwm-ipc endpoint unavailable; window-mgmt feature disabled",
               path=path, reason=type(e).__name__)

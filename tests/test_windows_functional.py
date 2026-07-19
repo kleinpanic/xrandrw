@@ -11,7 +11,6 @@ output/EDID association together (WM-03 + WM-04). Also closes coverage gaps on
 from __future__ import annotations
 
 import logging
-import socket
 import time
 from types import SimpleNamespace
 
