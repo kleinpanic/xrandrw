@@ -28,6 +28,13 @@ from xrandrw.logging_utils import logev
 # degrade events log through this shared "xrandrw" logger (mirrors the codebase).
 _LOG = logging.getLogger("xrandrw")
 
+# One restore delta. ``verb`` is one of "tagmon" | "tag" | "togglefloating" |
+# "configure"; ``args`` is the verb argument (a tagmon direction int, a tag
+# bitmask int, None for togglefloating, or a geometry dict for configure). The
+# coordinator (Plan 03) inserts a focus() before EVERY verb -- focus is NOT an
+# Action here because plan_restore is pure and focus is a live-X side effect.
+Action = namedtuple("Action", "verb args")
+
 
 def _safe_close(d) -> None:
     if d is not None:
@@ -100,3 +107,63 @@ class RelocationControl:
             return False
         finally:
             _safe_close(d)
+
+
+# --------------------------------------------------------------------------
+# Pure planning helpers (no I/O; unit-provable headless)
+# --------------------------------------------------------------------------
+
+def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> "int | None":
+    """Return the fewest-hop RELATIVE tagmon direction from ``cur_num`` to ``target_num``.
+
+    dwm's ``tagmon`` moves the selected client by a RELATIVE monitor delta
+    (spike 003, WM-05), so the coordinator drives it one hop at a time. This
+    helper returns ``+1`` (next) or ``-1`` (previous) picking whichever wraps in
+    the fewer hops, with a deterministic ``+1`` tie-break. It returns ``None``
+    -- meaning "do not move" -- when there are fewer than two monitors, when
+    ``target_num`` is outside ``range(n_monitors)``, or when already on target.
+    It can NEVER return an unbounded step count; the iteration bound + giveup
+    live in the Plan-03 coordinator.
+    """
+    if n_monitors < 2:
+        return None
+    if target_num not in range(n_monitors):
+        return None
+    if cur_num == target_num:
+        return None
+    forward = (target_num - cur_num) % n_monitors
+    backward = (cur_num - target_num) % n_monitors
+    return 1 if forward <= backward else -1
+
+
+def plan_restore(record, live) -> "list[Action]":
+    """Compute the ordered restore deltas for one displaced window (PURE, no I/O).
+
+    ``record`` is a captured ``WindowRecord`` (or any object exposing
+    ``is_floating``, ``tags``, ``geometry``); ``live`` duck-types the CURRENT
+    dwm view (``target_monitor``, ``current_monitor``, ``current_floating``,
+    ``n_monitors``). The returned ordered list is (spike 003/004, WM-05):
+
+      1. ``tagmon(dir)`` -- only when the window must change monitor and a
+         non-None direction exists;
+      2. ``tag(tags)`` -- always restore the saved tag bitmask;
+      3. ``togglefloating`` -- ONLY when the live floating state differs from the
+         saved one (restore the saved state, never a gratuitous conversion);
+      4. ``configure(geometry)`` -- IFF the record is floating.
+
+    This is the tiled-vs-floating guarantee: a TILED record (``is_floating``
+    False) NEVER yields a ``configure`` and is NEVER toggled beyond restoring its
+    saved state, so tiling is preserved and dwm re-tiles it.
+    """
+    actions: "list[Action]" = []
+    target = live.target_monitor
+    if target is not None and target != live.current_monitor:
+        direction = tagmon_direction(live.current_monitor, target, live.n_monitors)
+        if direction is not None:
+            actions.append(Action("tagmon", direction))
+    actions.append(Action("tag", int(record.tags)))
+    if bool(live.current_floating) != bool(record.is_floating):
+        actions.append(Action("togglefloating", None))
+    if record.is_floating:
+        actions.append(Action("configure", dict(record.geometry)))
+    return actions
