@@ -281,9 +281,16 @@ def test_scrub_stale_powers_off_lingering_head(output_factory, logger):
     # HDMI-2 is disconnected AND already dark, so since 14-08 it is skipped as pure
     # waste (see the no-op comment in scrub_stale) -- an efficiency change, not a
     # safety one; the LIT head below is what the scrub actually exists for.
+    # WR-03: a LIT head carries BOTH a mode and a CRTC origin -- randr_resources_to_outputs
+    # derives them from one crtc_info, so "mode but no position" is not a state any X
+    # server can produce. These fixtures predate `position` (added 14-08) and modelled it
+    # anyway; they now express the real thing so they agree with `Output.is_lit`, the one
+    # liveness definition. Assertions below are unchanged.
     outs = {
-        "DSI-1": output_factory("DSI-1", connected=True, current_mode=(800, 480)),
-        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900)),
+        "DSI-1": output_factory("DSI-1", connected=True, current_mode=(800, 480),
+                                position=(0, 0)),
+        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900),
+                                 position=(800, 0)),
         "HDMI-2": output_factory("HDMI-2", connected=False, current_mode=None),
     }
     spy = _OffSpy()

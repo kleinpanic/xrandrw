@@ -22,6 +22,35 @@ class Output:
     modes: list[tuple[int, int, float, str]] = field(default_factory=list)  # (w,h,rate,flags "*+")
     edid_sha1: str | None = None
 
+    @property
+    def is_lit(self) -> bool:
+        """True iff this output has a LIVE CRTC -- it is driving pixels right now.
+
+        THE single definition of CRTC liveness (WR-03, 14-08). Before this there
+        were four divergent spellings of the same idea:
+
+          relocate.py    `o.current_mode is not None`                    (edge predicate)
+          apply.py       `o.position is None and o.current_mode is None` (scrub skip)
+          xrandr.py      `o.connected or o.current_mode is not None`     (hash inclusion)
+          test harness   `position is not None and current_mode is not None`
+
+        They agreed only because :func:`randr_resources_to_outputs` derives BOTH
+        fields from one ``ci``. That is an accident of one producer, and the test
+        model had ALREADY drifted to a different predicate from production. The
+        relocation edge predicate and the apply scrub predicate are now
+        load-bearing AGAINST each other -- that pairing IS the architecture of the
+        replug-bounce fix -- so a future ``Output`` producer that populates one
+        field but not the other would desynchronise them SILENTLY. Routing all
+        four through this property makes that impossible.
+
+        Both fields are required: a dark output has ``crtc=None`` hence BOTH
+        ``position`` and ``current_mode`` None, so the half-populated state is not
+        reachable from the current producer, and defining liveness over both means
+        any producer that ever creates it is treated as dark (the conservative
+        direction -- we never hand a mutating verb a head we are unsure about).
+        """
+        return self.current_mode is not None and self.position is not None
+
 # Plain struct the live RandRReader hands to the pure mapper (oid is the loop var, not on oi).
 _RROutput = namedtuple("_RROutput", "oid name connection crtc modes num_preferred")
 
@@ -174,7 +203,7 @@ def topology_hash_from_outputs(outs: dict[str, Output]) -> str:
         # A disconnected head whose CRTC is still lit (unplug leaves it driving pixels) must
         # be visible to change detection or the daemon never heals it. Idle disconnected
         # connectors (no CRTC) stay out of the hash to avoid churn noise.
-        if o.connected or o.current_mode is not None:
+        if o.connected or o.is_lit:
             parts.append(f"{o.name}|{o.connected}|{o.current_mode}")
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()
 

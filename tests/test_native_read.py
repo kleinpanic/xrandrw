@@ -281,15 +281,21 @@ def _hash_for(monkeypatch, outs):
 def test_topology_hash_sees_lingering_disconnected_crtc(monkeypatch, output_factory):
     # Regression for the reported bug: unplugged HDMI-1 still driving 1600x900 was
     # invisible to change detection, so the daemon never powered it off.
+    # WR-03: a LIT head carries BOTH a mode and a CRTC origin (one crtc_info produces
+    # both), so these fixtures now spell the physically-realizable state and agree with
+    # `Output.is_lit`, the one liveness definition. Assertions are unchanged.
     def dsi():
-        return output_factory("DSI-1", connected=True, current_mode=(800, 480))
+        return output_factory("DSI-1", connected=True, current_mode=(800, 480),
+                              position=(0, 0))
     lit = {"DSI-1": dsi(),
-           "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900))}
+           "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900),
+                                    position=(800, 0))}
     off = {"DSI-1": dsi(),
            "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=None)}
     solo = {"DSI-1": dsi()}
     plugged = {"DSI-1": dsi(),
-               "HDMI-1": output_factory("HDMI-1", connected=True, current_mode=(1600, 900))}
+               "HDMI-1": output_factory("HDMI-1", connected=True, current_mode=(1600, 900),
+                                        position=(800, 0))}
 
     h_lit = _hash_for(monkeypatch, lit)
     h_off = _hash_for(monkeypatch, off)

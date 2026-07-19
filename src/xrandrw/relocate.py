@@ -366,7 +366,7 @@ class RelocationCoordinator:
         # It also correctly STOPS the coordinator recording an unplug whose CRTC the apply
         # has not torn down yet: dwm still has that monitor and has not evacuated, so
         # recording would produce records for windows that were never displaced.
-        cur = {name for name, o in outs.items() if o.current_mode is not None}
+        cur = {name for name, o in outs.items() if o.is_lit}
         if self._prev_connected is None:
             self._prev_connected = cur
             self._snapshot = self._safe_capture(logger)

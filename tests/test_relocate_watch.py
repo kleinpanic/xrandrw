@@ -280,8 +280,10 @@ class BounceWorld:
         self.outs[name].connected = up
 
     def lit(self):
-        return sorted((o for o in self.outs.values()
-                       if o.position is not None and o.current_mode is not None),
+        # WR-03: the model uses the PRODUCTION liveness predicate. It previously
+        # spelled its own (`position is not None and current_mode is not None`),
+        # which is how the four-way divergence started.
+        return sorted((o for o in self.outs.values() if o.is_lit),
                       key=lambda o: o.position[0])
 
     def monitor_of(self, name):
@@ -793,3 +795,28 @@ def test_apply_bail_does_not_freeze_change_detection(tmp_path, monkeypatch, logg
     assert healed == topology_hash_from_outputs(world.outs), (
         "a COMPLETED apply over a healed topology is absorbed normally")
     assert coord.calls == 1, "the COMPLETED retry apply does settle"
+
+
+def test_is_lit_is_the_one_liveness_definition(output_factory):
+    """WR-03: production, the apply scrub, the digest and this harness agree.
+
+    The edge predicate (relocate) and the scrub predicate (apply) are load-bearing
+    AGAINST each other, so they must not be able to drift. Pin the property AND
+    the fact that all four call sites route through it.
+    """
+    lit = output_factory("HDMI-1", connected=False, position=(1920, 0),
+                         current_mode=(1600, 900))
+    dark = output_factory("HDMI-1", connected=True)
+    assert lit.is_lit is True, "disconnected-but-lit is LIT (the whole 14-08 defect)"
+    assert dark.is_lit is False, "connected-but-dark is NOT lit (the black-monitor state)"
+
+    # Half-populated is unreachable from randr_resources_to_outputs, but if a
+    # future producer ever creates it, it must read as DARK (conservative).
+    assert output_factory("X", position=(0, 0)).is_lit is False
+    assert output_factory("X", current_mode=(800, 600)).is_lit is False
+
+    # The harness model uses the production predicate, not a private copy.
+    world = BounceWorld()
+    world.outs["HDMI-1"].position = None
+    world.outs["HDMI-1"].current_mode = None
+    assert [o.name for o in world.lit()] == ["eDP-1"]

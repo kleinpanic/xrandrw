@@ -101,7 +101,7 @@ def scrub_stale(outs: dict[str, Output], logger: logging.Logger, backend: ApplyB
         # auto_pos would set; skipping that call on a position-and-mode match alone would
         # silently leave a stale scale or panning in place. The wasteful re-modeset is real
         # and is filed as a follow-up in 14-09, not fixed here on unobservable state.
-        if o.position is None and o.current_mode is None:
+        if not o.is_lit:
             continue
         off(connector, logger)
 
