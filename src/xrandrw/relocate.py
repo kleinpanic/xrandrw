@@ -24,6 +24,7 @@ the ordering/bounding logic lives in the PURE, headless-testable helpers
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from collections import namedtuple
@@ -87,10 +88,8 @@ Action = namedtuple("Action", "verb args")
 
 def _safe_close(d) -> None:
     if d is not None:
-        try:
+        with contextlib.suppress(Exception):
             d.close()
-        except Exception:
-            pass
 
 
 class RelocationControl:
@@ -473,7 +472,7 @@ class RelocationCoordinator:
                 elif action.verb == "configure":
                     self._focus_and_confirm(rec.xid, logger)
                     self._control.configure_geometry(rec.xid, action.args)
-            except Exception as e:
+            except Exception as e:  # noqa: PERF203  # per-step guard is the WM-08 one-failure-never-aborts-window contract
                 # One failed step never aborts the window and never crashes.
                 logev(logger, logging.WARNING, "relocate_step_fail",
                       "restore step failed; continuing", pid=rec.pid, verb=action.verb, error=str(e))

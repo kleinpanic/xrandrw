@@ -23,6 +23,7 @@ Every byte from the untrusted socket is validated here -- magic, hard size cap
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -326,10 +327,8 @@ def request(mtype: int, payload: bytes | str = b"", *,
         # so no raw OSError leaks past the SEC-01 boundary.
         raise DwmIpcUnavailable(f"socket error during request: {e}") from e
     finally:
-        try:
+        with contextlib.suppress(OSError):
             sock.close()
-        except OSError:
-            pass
     return rtype, decode_reply(rtype, body)
 
 
@@ -421,9 +420,7 @@ def subscribe(path: str = DEFAULT_SOCK_PATH, *, timeout: float = DEFAULT_TIMEOUT
     try:
         sock.sendall(pack_header(SUBSCRIBE, len(payload)) + payload)
     except OSError as e:
-        try:
+        with contextlib.suppress(OSError):
             sock.close()
-        except OSError:
-            pass
         raise DwmIpcUnavailable(f"subscribe send: {e}") from e
     return sock

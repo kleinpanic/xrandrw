@@ -12,6 +12,7 @@ headless. READ/model ONLY -- no window movement or control here.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import socket
 from dataclasses import asdict, dataclass
@@ -150,10 +151,8 @@ class WindowXReader:
 
 def _safe_close(d) -> None:
     if d is not None:
-        try:
+        with contextlib.suppress(Exception):
             d.close()
-        except Exception:
-            pass
 
 
 # --------------------------------------------------------------------------
@@ -400,7 +399,7 @@ def build_record(xid, identity, client, connector, edid) -> WindowRecord:
     )
 
 
-def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
+def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # noqa: C901  # hardened multi-branch capture pipeline; each branch is a documented degrade path (see docstring)
                     hostname: str | None = None, sock_path: str | None = None,
                     timeout: float = dwmipc.DEFAULT_TIMEOUT,
                     logger: logging.Logger | None = None) -> list[WindowRecord]:
