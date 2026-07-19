@@ -48,3 +48,6 @@ ignore_names = ["frame"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "functional: real Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm",
+]
