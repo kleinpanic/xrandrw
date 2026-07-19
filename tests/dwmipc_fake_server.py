@@ -29,6 +29,7 @@ Also runnable standalone for a self round-trip smoke check::
 """
 from __future__ import annotations
 
+import copy
 import json
 import socket
 import struct
@@ -65,7 +66,7 @@ VALID_CLIENT = {
 VALID_RUN_COMMAND = {"result": "success"}
 VALID_SUBSCRIBE = {"result": "success"}
 
-_VALID_MODES = {"auto", "monitors", "client", "run_command", "subscribe"}
+_VALID_MODES = {"auto", "monitors", "client", "run_command", "subscribe", "stateful"}
 _HOSTILE_MODES = {
     "truncated_header",
     "oversized",
@@ -97,7 +98,7 @@ class FakeDwmServer:
 
     def __init__(self, path, mode: str = "auto", *, monitors=None, client=None,
                  run_result=None, oversized_size: int = 256 * 1024 * 1024,
-                 trickle_interval: float = 0.05):
+                 trickle_interval: float = 0.05, clients=None):
         if mode not in _VALID_MODES and mode not in _HOSTILE_MODES:
             raise ValueError(f"unknown fake-server mode {mode!r}")
         self.path = str(path)
@@ -107,6 +108,20 @@ class FakeDwmServer:
         self.run_result = run_result if run_result is not None else VALID_RUN_COMMAND
         self.oversized_size = oversized_size
         self.trickle_interval = trickle_interval
+        # --- stateful mode: a mutable per-window dwm model (additive; only used
+        # when mode == "stateful"). Guarded by _lock because the server runs on a
+        # daemon thread while the test thread drives select/set_geometry/state.
+        self._lock = threading.Lock()
+        self._clients: dict = {}          # int xid -> client dict (mutable)
+        self._selected: Optional[int] = None
+        self._n_monitors = 1
+        if clients is not None:
+            for c in clients:
+                self._clients[int(c["xid"])] = copy.deepcopy(c)
+            if self._clients:
+                self._n_monitors = max(int(c["monitor_number"])
+                                       for c in self._clients.values()) + 1
+            self._n_monitors = max(1, self._n_monitors)
         # Every request the server received, as (rtype, size, payload_bytes).
         self.received: List[Tuple[int, int, bytes]] = []
         self._stop = threading.Event()
@@ -195,7 +210,108 @@ class FakeDwmServer:
             xid = None
         return self.client(xid)
 
+    # --- stateful dwm model (mode == "stateful" only) ----------------------
+
+    def select(self, xid) -> None:
+        """Set which client the next run_command verb acts on (X-focus bridge)."""
+        with self._lock:
+            self._selected = int(xid)
+
+    def set_geometry(self, xid, geometry) -> None:
+        """Overwrite a client's current geometry (mirrors ConfigureWindow)."""
+        with self._lock:
+            c = self._clients.get(int(xid))
+            if c is not None:
+                c.setdefault("geometry", {})["current"] = dict(geometry)
+
+    def state(self, xid) -> Optional[dict]:
+        """Return a snapshot copy of one client's mutable state for assertions."""
+        with self._lock:
+            c = self._clients.get(int(xid))
+            if c is None:
+                return None
+            return {
+                "monitor_number": c["monitor_number"],
+                "tags": c["tags"],
+                "is_floating": c["states"]["is_floating"],
+                "is_fullscreen": c["states"]["is_fullscreen"],
+                "geometry": copy.deepcopy(c["geometry"]),
+            }
+
+    def _build_monitors_locked(self) -> list:
+        mons = []
+        for num in range(self._n_monitors):
+            xids = [xid for xid, c in self._clients.items()
+                    if int(c["monitor_number"]) == num]
+            mons.append({
+                "num": num,
+                "monitor_geometry": {"x": num * 1920, "y": 0, "width": 1920, "height": 1080},
+                "layout": {"symbol": "[]="},
+                "clients": {"all": xids},
+            })
+        return mons
+
+    @staticmethod
+    def _decode_xid(payload: bytes) -> Optional[int]:
+        try:
+            return int(json.loads(payload.rstrip(b"\x00").decode())["client_window_id"])
+        except (ValueError, KeyError, AttributeError, TypeError):
+            return None
+
+    def _client_view_locked(self, client: dict) -> dict:
+        view = copy.deepcopy(client)
+        view.pop("xid", None)
+        return view
+
+    @staticmethod
+    def _not_found_client(xid) -> dict:
+        # Still shaped to satisfy validate_client (name/tags/geometry/states).
+        return {
+            "name": "", "tags": 0, "monitor_number": -1,
+            "geometry": {"current": {"x": 0, "y": 0, "width": 0, "height": 0}},
+            "states": {"is_floating": False, "is_fullscreen": False},
+        }
+
+    def _apply_run_command_locked(self, payload: bytes) -> None:
+        try:
+            req = json.loads(payload.rstrip(b"\x00").decode())
+            command = req.get("command")
+            args = req.get("args") or []
+        except (ValueError, AttributeError):
+            return  # malformed -> dwm no-op
+        if self._selected is None:
+            return  # nothing selected -> dwm no-op
+        c = self._clients.get(self._selected)
+        if c is None:
+            return
+        if command == "tagmon" and args:
+            c["monitor_number"] = (int(c["monitor_number"]) + int(args[0])) % self._n_monitors
+        elif command == "tag" and args:
+            c["tags"] = int(args[0])
+        elif command == "togglefloating":
+            c["states"]["is_floating"] = not c["states"]["is_floating"]
+        # unknown command -> success reply without mutation (dwm no-op)
+
+    def _stateful_reply(self, rtype: int, payload: bytes) -> bytes:
+        with self._lock:
+            if rtype == GET_MONITORS:
+                return _frame(GET_MONITORS, self._build_monitors_locked())
+            if rtype == GET_DWM_CLIENT:
+                xid = self._decode_xid(payload)
+                c = self._clients.get(xid) if xid is not None else None
+                if c is None:
+                    return _frame(GET_DWM_CLIENT, self._not_found_client(xid))
+                return _frame(GET_DWM_CLIENT, self._client_view_locked(c))
+            if rtype == RUN_COMMAND:
+                self._apply_run_command_locked(payload)
+                return _frame(RUN_COMMAND, self.run_result)
+            if rtype == SUBSCRIBE:
+                return _frame(SUBSCRIBE, VALID_SUBSCRIBE)
+            return _frame(GET_MONITORS, self._build_monitors_locked())
+
     def _valid_reply(self, rtype: int, payload: bytes = b"") -> bytes:
+        if self.mode == "stateful":
+            return self._stateful_reply(rtype, payload)
         if self.mode == "monitors" or (self.mode == "auto" and rtype == GET_MONITORS):
             return _frame(GET_MONITORS, self.monitors)
         if self.mode == "client" or (self.mode == "auto" and rtype == GET_DWM_CLIENT):
