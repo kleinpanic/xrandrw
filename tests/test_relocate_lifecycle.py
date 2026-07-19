@@ -11,6 +11,7 @@ one-window-failure isolation, bounded tagmon giveup, and the boot-seed baseline.
 from __future__ import annotations
 
 import logging
+import shutil
 import threading
 import time
 from types import SimpleNamespace
@@ -477,3 +478,40 @@ def test_stop_evt_bails_restore_after_current_window(tmp_path, monkeypatch, logg
         assert len(restored) == 1
         still_displaced = [k for k in ((PID_A, ST_A), (PID_B, ST_B)) if k in coord._displaced]
         assert len(still_displaced) == 1
+
+
+# ---------------------------------------------------------------------------
+# WR-02/AUDIT-A: a displaced record whose process has exited is swept on the
+# next steady settle so _displaced cannot leak forever in a long-lived daemon.
+# ---------------------------------------------------------------------------
+
+def test_dead_displaced_record_evicted_on_steady_settle(tmp_path, monkeypatch, logger, caplog):
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    clients = [_client(A, 4, 1, GA, True)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        outs["DP-2"].connected = False           # DP-2 stays disconnected
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # The displaced window's process exits (its /proc entry disappears).
+        shutil.rmtree(tmp_path / "proc" / str(PID_A))
+
+        # A steady settle (no removal, no return) sweeps the dead record.
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        assert (PID_A, ST_A) not in coord._displaced
+        assert any(getattr(r, "event", None) == "relocate_displaced_evict"
+                   for r in caplog.records)

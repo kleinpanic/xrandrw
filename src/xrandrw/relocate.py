@@ -27,7 +27,8 @@ from Xlib.protocol import event
 from xrandrw import dwmipc
 from xrandrw.logging_utils import logev
 from xrandrw.windows import (WindowXReader, capture_windows,
-                             match_dwm_monitor_to_output, resolve_pid)
+                             match_dwm_monitor_to_output, read_proc_identity,
+                             resolve_pid)
 from xrandrw.xrandr import RandRReader
 # NOTE: read_edids is intentionally NOT imported -- the coordinator never
 # references it (capture_windows calls read_edids internally on the outputs it
@@ -296,7 +297,9 @@ class RelocationCoordinator:
         if returned:
             self._restore_returned(returned, outs, env, logger, stop_evt)
         if not removed:
-            # Steady/return state = current good placements; keep snapshot fresh.
+            # Steady/return state = current good placements; keep snapshot fresh
+            # and sweep dead displaced records so the map cannot leak unbounded.
+            self._sweep_displaced(logger)
             self._snapshot = self._safe_capture(logger)
 
     # --- helpers -----------------------------------------------------------
@@ -317,6 +320,25 @@ class RelocationCoordinator:
             logev(logger, logging.WARNING, "relocate_capture_fail",
                   "capture failed; keeping previous snapshot", error=str(e))
             return self._snapshot
+
+    def _sweep_displaced(self, logger) -> None:
+        """Evict displaced records whose ``(pid, starttime)`` is no longer live.
+
+        WR-02/AUDIT-A: displaced records normally evict when their output
+        reconnects, but a PERMANENTLY-removed output or a process that exits
+        while still displaced would leak forever in a long-lived daemon. On each
+        steady-state settle we re-resolve every displaced record's process
+        against ``/proc``; a record whose ``(pid, starttime)`` no longer resolves
+        (dead process or a reused PID) is dropped. No control/IPC call is made --
+        this is a pure ``/proc`` liveness check, so it never touches a window.
+        """
+        for key, rec in list(self._displaced.items()):
+            identity = read_proc_identity(rec.pid, self._proc_root, logger=logger)
+            if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
+                del self._displaced[key]
+                logev(logger, logging.INFO, "relocate_displaced_evict",
+                      "displaced record process gone; evicting stale entry",
+                      pid=rec.pid, output=rec.output)
 
     def _record_displaced(self, removed, logger) -> None:
         """Move last-snapshot records on the removed outputs into ``_displaced``.
