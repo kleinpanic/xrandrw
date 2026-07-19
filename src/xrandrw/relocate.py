@@ -17,12 +17,22 @@ the ordering/bounding logic lives in the PURE, headless-testable helpers
 from __future__ import annotations
 
 import logging
+import time
 from collections import namedtuple
+from types import SimpleNamespace
 
 from Xlib import X, display
 from Xlib.protocol import event
 
+from xrandrw import dwmipc
 from xrandrw.logging_utils import logev
+from xrandrw.windows import (WindowXReader, capture_windows,
+                             match_dwm_monitor_to_output, resolve_pid)
+from xrandrw.xrandr import RandRReader
+# NOTE: read_edids is intentionally NOT imported -- the coordinator never
+# references it (capture_windows calls read_edids internally on the outputs it
+# reads), so importing it here would be dead code a Phase-12 vulture/ruff gate
+# would flag (W3). Tests monkeypatch xrandrw.windows.read_edids, not relocate.
 
 # Module logger; the seam is the only place that touches a live Display, so its
 # degrade events log through this shared "xrandrw" logger (mirrors the codebase).
@@ -167,3 +177,223 @@ def plan_restore(record, live) -> "list[Action]":
     if record.is_floating:
         actions.append(Action("configure", dict(record.geometry)))
     return actions
+
+
+# --------------------------------------------------------------------------
+# RelocationCoordinator: unplug-record / replug-restore state machine (WM-05/08)
+# --------------------------------------------------------------------------
+
+class RelocationCoordinator:
+    """In-memory owner of displaced-window records + the record/restore machine.
+
+    Composed from the Plan-01 primitives (:class:`RelocationControl`,
+    ``plan_restore``, ``tagmon_direction``), the Phase-8 ``dwmipc`` verbs, and the
+    Phase-9 ``capture_windows`` / ``resolve_pid`` / ``match_dwm_monitor_to_output``
+    seams. ``on_settled`` is the single watch entry point (Plan 04 calls it
+    post-apply). The whole lifecycle is a no-op unless :meth:`_enabled`
+    (``config_enabled`` AND ``dwmipc.available()``) so the Phase-11 config flag
+    ANDs in without refactor. Every per-window IPC/X failure is logged and
+    skipped -- never fatal (WM-08); display layout always still applies.
+    """
+
+    def __init__(self, *, control=None, reader=None, xreader=None,
+                 capture=capture_windows, sock_path=None, proc_root: str = "/proc",
+                 config_enabled: bool = True, ipc_timeout: float = dwmipc.DEFAULT_TIMEOUT):
+        self._control = control if control is not None else RelocationControl()
+        self._reader = reader if reader is not None else RandRReader()
+        self._xreader = xreader if xreader is not None else WindowXReader()
+        self._capture = capture
+        self._sock_path = sock_path
+        self._proc_root = proc_root
+        self._config_enabled = config_enabled
+        # Small per-window IPC timeout so a synchronous restore cannot stall the
+        # single-threaded watch select() loop (W2 accepted tradeoff); threaded
+        # into EVERY dwmipc call below. cli.py (Plan 04) may pass a tighter value.
+        self._ipc_timeout = ipc_timeout
+        self._displaced: "dict[tuple[int, int], object]" = {}
+        self._snapshot: "dict[tuple[int, int], object]" = {}
+        self._prev_connected: "set[str] | None" = None
+
+    @property
+    def _path(self) -> str:
+        return self._sock_path or dwmipc.DEFAULT_SOCK_PATH
+
+    def _enabled(self) -> bool:
+        # The AND is where the Phase-11 config flag slots in without refactor:
+        # config_enabled (defaults True this phase) AND a live dwm-ipc endpoint.
+        return self._config_enabled and dwmipc.available(self._path, timeout=self._ipc_timeout)
+
+    # --- single watch entry point ------------------------------------------
+
+    def on_settled(self, env, logger) -> None:
+        """Post-apply hook: record on unplug, restore on replug, seed on boot.
+
+        A no-op unless :meth:`_enabled`. On the FIRST call (``_prev_connected``
+        is None) it only seeds the baseline (``_prev_connected`` + ``_snapshot``)
+        so the FIRST unplug of the session is recordable -- the first cycle is
+        never lost. Thereafter a removed output moves last-snapshot records into
+        ``_displaced``; a returned output restores same-identity records; a
+        steady settle (no removal) refreshes the snapshot.
+        """
+        if not self._enabled():
+            return
+        # WR-01-style guard: a hotplug / X-restart race can make this live read
+        # raise transiently; degrade (log + return) instead of propagating.
+        try:
+            outs = self._reader.read(logger)
+        except Exception as e:
+            logev(logger, logging.WARNING, "relocate_read_fail",
+                  "x read failed at settle; skipping relocation this cycle", error=str(e))
+            return
+        cur = {name for name, o in outs.items() if o.connected}
+        if self._prev_connected is None:
+            self._prev_connected = cur
+            self._snapshot = self._safe_capture(logger)
+            logev(logger, logging.INFO, "relocate_seed",
+                  "seeded steady-state baseline", connected=len(cur), windows=len(self._snapshot))
+            return
+        removed = self._prev_connected - cur
+        returned = cur - self._prev_connected
+        self._prev_connected = cur
+        if removed:
+            self._record_displaced(removed, logger)
+        if returned:
+            self._restore_returned(returned, outs, env, logger)
+        if not removed:
+            # Steady/return state = current good placements; keep snapshot fresh.
+            self._snapshot = self._safe_capture(logger)
+
+    # --- helpers -----------------------------------------------------------
+
+    def _safe_capture(self, logger) -> "dict[tuple[int, int], object]":
+        """Capture the current placements keyed by (pid, starttime).
+
+        On any failure log ``relocate_capture_fail`` and return the PREVIOUS
+        snapshot unchanged -- a failed capture must never blow away the last
+        good baseline (WM-08).
+        """
+        try:
+            recs = self._capture(reader=self._reader, xreader=self._xreader,
+                                 proc_root=self._proc_root, sock_path=self._sock_path,
+                                 logger=logger)
+            return {(r.pid, r.starttime): r for r in recs}
+        except Exception as e:
+            logev(logger, logging.WARNING, "relocate_capture_fail",
+                  "capture failed; keeping previous snapshot", error=str(e))
+            return self._snapshot
+
+    def _record_displaced(self, removed, logger) -> None:
+        """Move last-snapshot records on the removed outputs into ``_displaced``.
+
+        Uses the LAST snapshot (taken before the disruption) -- does NOT
+        re-capture now (dwm has already evacuated). We do not fight dwm's
+        evacuation; we only remember which PIDs were displaced from where.
+        """
+        for key, rec in list(self._snapshot.items()):
+            if rec.output in removed:
+                self._displaced[key] = rec
+                logev(logger, logging.INFO, "relocate_record",
+                      "recorded displaced window", pid=rec.pid, output=rec.output)
+
+    def _restore_returned(self, returned, outs, env, logger) -> None:
+        """Restore displaced records whose output has returned; drop stale ones."""
+        t0 = time.monotonic()
+        dropped = skipped = 0
+        # SINGLE whole-cycle abort: a DwmIpcUnavailable at cycle ENTRY means the
+        # dwm-ipc endpoint itself is gone, so abandon this cycle's relocation
+        # entirely -- the display layout still applied (WM-08).
+        try:
+            monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
+        except dwmipc.DwmIpcUnavailable as e:
+            logev(logger, logging.WARNING, "relocate_cycle_abandon",
+                  "dwm-ipc unavailable at cycle entry; abandoning this relocation cycle",
+                  error=str(e))
+            return
+        mapping = match_dwm_monitor_to_output(monitors, outs, logger=logger)
+        conn_to_mon = {conn: num for num, conn in mapping.items() if conn is not None}
+        for key, rec in list(self._displaced.items()):
+            if rec.output not in returned:
+                continue
+            try:
+                result = self._restore_one(rec, monitors, conn_to_mon, logger)
+            except Exception as e:
+                # ANY raise here -- INCLUDING a per-window DwmIpcUnavailable from
+                # get_dwm_client/run_command (dwmipc raises the SAME type for a
+                # gone/bad window as for a dead socket and cannot disambiguate) --
+                # is treated as THIS window failing: log, skip, leave it displaced
+                # for a later cycle so other windows still restore.
+                logev(logger, logging.WARNING, "relocate_window_fail",
+                      "window restore failed; leaving displaced", pid=rec.pid, error=str(e))
+                skipped += 1
+                continue
+            if result == "drop":
+                del self._displaced[key]
+                dropped += 1
+        logev(logger, logging.INFO, "relocate_cycle_done",
+              "relocation cycle complete",
+              duration_ms=int((time.monotonic() - t0) * 1000), dropped=dropped, skipped=skipped)
+
+    def _restore_one(self, rec, monitors, conn_to_mon, logger) -> str:
+        """Restore ONE displaced record; return "drop" (done OR stale identity).
+
+        Re-resolves ``(pid, starttime)``: a dead OR reused-PID window (identity
+        None/mismatch) is dropped WITHOUT any control call -- never touch another
+        instance (spike 004 hard rule). Otherwise reads the live client, plans the
+        restore, and executes each Action focus-then-act, each wrapped so one
+        failed step never aborts the window.
+        """
+        identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
+        if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
+            logev(logger, logging.INFO, "relocate_skip_identity",
+                  "displaced window identity stale/reused; leaving untouched",
+                  pid=rec.pid, xid=rec.xid)
+            return "drop"
+        client = dwmipc.get_dwm_client(rec.xid, path=self._path, timeout=self._ipc_timeout)
+        target = conn_to_mon.get(rec.output)
+        live = SimpleNamespace(
+            target_monitor=target,
+            current_monitor=client["monitor_number"],
+            current_floating=bool(client["states"]["is_floating"]),
+            n_monitors=len(monitors),
+        )
+        for action in plan_restore(rec, live):
+            try:
+                if action.verb == "tagmon":
+                    self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
+                elif action.verb == "tag":
+                    self._control.focus(rec.xid)
+                    dwmipc.run_command("tag", action.args, path=self._path, timeout=self._ipc_timeout)
+                elif action.verb == "togglefloating":
+                    self._control.focus(rec.xid)
+                    dwmipc.run_command("togglefloating", path=self._path, timeout=self._ipc_timeout)
+                elif action.verb == "configure":
+                    self._control.focus(rec.xid)
+                    self._control.configure_geometry(rec.xid, action.args)
+            except Exception as e:
+                # One failed step never aborts the window and never crashes.
+                logev(logger, logging.WARNING, "relocate_step_fail",
+                      "restore step failed; continuing", pid=rec.pid, verb=action.verb, error=str(e))
+                continue
+        logev(logger, logging.INFO, "relocate_restore",
+              "restored displaced window", pid=rec.pid, output=rec.output)
+        return "drop"
+
+    def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> None:
+        """Bounded focus-then-tagmon loop: at most ``n_monitors`` hops.
+
+        Focus precedes EVERY hop (selection drifts), re-reads ``monitor_number``
+        after each ``tagmon`` and stops on match; on no-match after the bound logs
+        ``relocate_monitor_giveup`` and leaves the window where dwm put it (safe
+        default). The target monitor is re-derived from the NEW topology
+        (``conn_to_mon`` in the caller), not the stale saved monitor_number.
+        """
+        for _ in range(n_monitors):
+            self._control.focus(rec.xid)
+            dwmipc.run_command("tagmon", direction, path=self._path, timeout=self._ipc_timeout)
+            cur = dwmipc.get_dwm_client(rec.xid, path=self._path,
+                                        timeout=self._ipc_timeout)["monitor_number"]
+            if cur == target:
+                return
+        logev(logger, logging.WARNING, "relocate_monitor_giveup",
+              "tagmon did not reach target monitor within bound; leaving as-is",
+              pid=rec.pid, target=target)
