@@ -364,22 +364,30 @@ def match_dwm_monitor_to_output(dwm_monitors, outputs,
         want_pos = (mg.get("x"), mg.get("y"))
         want_mode = (mg.get("width"), mg.get("height"))
         if all(_geometry_int(v) for v in want_pos + want_mode):
-            matches = [
+            geometry_matches = [
                 name for name, o in outputs.items()
                 if o.position == want_pos and o.current_mode == want_mode
             ]
+            matches = geometry_matches
             if len(matches) > 1:
                 # Ambiguous on geometry alone -> prefer the connected candidate.
                 matches = [name for name in matches if outputs[name].connected]
         else:
-            matches = []  # malformed geometry never matches (never coerced)
+            geometry_matches = matches = []  # malformed geometry never matches
         if len(matches) == 1:
             result[num] = matches[0]
         else:
             result[num] = None
+            # WR-02: log the PRE-tie-break count as well. `matches` is rebound by
+            # the tie-break above, so logging only its length reports the POST-filter
+            # count -- and a mirror pair that were BOTH unplugged-but-lit would log
+            # `candidates=0`, indistinguishable from a true zero-geometry-match. The
+            # entire forensic difficulty of the 04:21:43,109 incident was that
+            # `candidates=0` was ambiguous; do not make it ambiguous again.
             logev(lg, logging.INFO, "window_monitor_unmatched",
                   "no confident single output match for dwm monitor",
-                  monitor=num, geometry=mg, candidates=len(matches),
+                  monitor=num, geometry=mg, candidates=len(geometry_matches),
+                  candidates_after_tiebreak=len(matches),
                   outputs=_outputs_state_summary(outputs))
     return result
 

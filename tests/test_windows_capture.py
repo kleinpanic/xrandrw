@@ -142,6 +142,30 @@ def test_unmatched_event_carries_per_output_diagnostics(logger, caplog):
     assert rec.levelno == logging.INFO
     assert "DP-1" in rec.outputs and "conn" in rec.outputs
     assert "(0, 0)" in rec.outputs and "(1920, 1080)" in rec.outputs
+    # WR-02: a true zero-geometry-match reports zero on BOTH counters.
+    assert rec.candidates == 0 and rec.candidates_after_tiebreak == 0
+
+
+def test_unmatched_event_distinguishes_tiebreak_elimination_from_zero_match(logger, caplog):
+    """WR-02: `candidates=0` must no longer be ambiguous.
+
+    A mirror pair that are BOTH unplugged-but-lit match the geometry, then the
+    connected-preferring tie-break eliminates both. Pre-fix that logged
+    `candidates=0` -- identical to "nothing matched the geometry at all", which is
+    exactly the ambiguity that made the live 04:21:43,109 incident so hard to read.
+    """
+    outs = {
+        "DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), connected=False),
+        "DP-2": _out("DP-2", mode=(1920, 1080), position=(0, 0), connected=False),
+    }
+    mons = [_mon(0, 0, 0, 1920, 1080)]
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_windows_capture"):
+        got = match_dwm_monitor_to_output(mons, outs, logger=logger)
+    assert got == {0: None}, "still a refusal -- the tie-break resolved nothing"
+    rec = next(r for r in caplog.records
+               if getattr(r, "event", None) == "window_monitor_unmatched")
+    assert rec.candidates == 2, "two outputs DID match on geometry"
+    assert rec.candidates_after_tiebreak == 0, "and the tie-break eliminated both"
 
 
 def test_match_ambiguous_identical_geometry_is_none(logger, caplog):
