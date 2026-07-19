@@ -67,8 +67,15 @@ def _drive(monkeypatch, fake, script, topo):
     monkeypatch.setattr(watch.display, "Display", lambda: fake)
     monkeypatch.setattr(watch, "topology_hash", lambda logger=None: topo["hash"])
     applies = []
-    monkeypatch.setattr(watch, "apply_once",
-                        lambda env, logger, event_source: applies.append(event_source))
+
+    def _apply(env, logger, event_source):
+        # BL-01: apply_once's contract is now `-> bool` (True == a full apply
+        # completed). The fake must honour it, or every _drive test would exercise
+        # the new "apply bailed, do not absorb the hash" branch instead of the
+        # normal path it means to cover.
+        applies.append(event_source)
+        return True
+    monkeypatch.setattr(watch, "apply_once", _apply)
 
     pipe = {}
     real_pipe = os.pipe
@@ -162,6 +169,7 @@ def test_no_double_apply_from_own_mutations(monkeypatch, logger):
     def _apply(env, logger, event_source):
         applies.append(event_source)
         topo["hash"] = "h2"
+        return True  # BL-01: a completed apply
     monkeypatch.setattr(watch, "apply_once", _apply)
 
     watch.watch_loop(_env(), logger)

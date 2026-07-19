@@ -101,6 +101,11 @@ def _drive(monkeypatch, fake, script, topo, events):
 
     def _apply(env, logger, event_source):
         events.append(("apply", event_source))
+        # BL-01: apply_once's contract is now `-> bool` (True == a full apply
+        # completed). The fake must honour it, or these hook-timing tests would
+        # silently exercise the new "apply bailed" branch (no settle, no hash
+        # absorption) instead of the normal post-apply path they mean to cover.
+        return True
     monkeypatch.setattr(watch, "apply_once", _apply)
 
     pipe = {}
@@ -583,6 +588,7 @@ class _RecordingBackend:
     def __init__(self):
         self.offs = []
         self.autos = []
+        self.applied = None  # apply_once's completion bool (BL-01)
 
     def output_off(self, connector, logger):
         self.offs.append(connector)
@@ -598,17 +604,30 @@ class _RecordingBackend:
 
 
 def _apply_over_scripted_reads(monkeypatch, tmp_path, logger, reads):
-    """Run the REAL apply_once (and the REAL scrub_stale) over a scripted read pair."""
+    """Run the REAL apply_once (and the REAL scrub_stale) over a scripted read pair.
+
+    A scripted item that is an ``Exception`` is RAISED instead of returned, which
+    is how a transient mid-apply X failure (apply.py's read #1 / read #2 guards)
+    is expressed.
+    """
     backend = _RecordingBackend()
     it = iter(reads)
-    monkeypatch.setattr(apply_mod, "read_xrandr", lambda logger: next(it))
+
+    def _read(logger):
+        nxt = next(it)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+    monkeypatch.setattr(apply_mod, "read_xrandr", _read)
     monkeypatch.setattr(apply_mod, "wait_for_x", lambda logger: None)
     monkeypatch.setattr(apply_mod, "read_edids", lambda outs, logger: None)
     monkeypatch.setattr(apply_mod, "reapply_wallpaper", lambda env, logger: None)
     monkeypatch.setattr(apply_mod, "remap_touch", lambda env, names, logger: None)
     monkeypatch.setattr(apply_mod, "run", lambda *a, **k: None)
     monkeypatch.setattr(apply_mod, "get_apply_backend", lambda env: backend)
-    apply_mod.apply_once(_bounce_env(tmp_path), logger)
+    # BL-01: expose apply_once's completion bool so a caller can assert on the
+    # bail/complete distinction the watch loop now depends on.
+    backend.applied = apply_mod.apply_once(_bounce_env(tmp_path), logger)
     return backend
 
 
@@ -665,3 +684,112 @@ def test_topology_hash_from_outputs_is_pure(output_factory):
     dark["HDMI-1"] = output_factory("HDMI-1", connected=False)
     assert topology_hash_from_outputs(dark) != digest, (
         "a disconnected-but-lit head must be distinguishable from a dark one")
+
+
+# ---------------------------------------------------------------------------
+# BL-01 / WR-01: apply_once's completion bool, and what the watch loop may
+# absorb. These run the REAL apply_once and the REAL scrub_stale -- the natural
+# home in tests/test_apply.py runs under the ``mock_x`` fixture, which no-ops
+# scrub_stale, so it is STRUCTURALLY incapable of catching this regression.
+# ---------------------------------------------------------------------------
+
+
+class _SettleSpy:
+    """Coordinator stand-in that only counts on_settled invocations (WR-01)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def on_settled(self, env, logger, stop_evt=None):
+        self.calls += 1
+
+
+def _wire_apply_seams_scripted(monkeypatch, world, backend, read_hook):
+    """``_wire_apply_seams`` but apply's OWN reads run through ``read_hook``.
+
+    ``read_hook`` receives the 1-based index of the apply-level read (apply.py's
+    read #1 and read #2) and may raise to simulate the transient mid-apply X
+    failure the read-#2 guard was written for. The counter is CUMULATIVE across
+    applies, so a hook can fail one apply and let the retry succeed.
+    """
+    _wire_apply_seams(monkeypatch, world, backend)
+    n = {"i": 0}
+
+    def _read(logger):
+        n["i"] += 1
+        read_hook(n["i"])
+        return world.snapshot()
+    monkeypatch.setattr(apply_mod, "read_xrandr", _read)
+    return n
+
+
+def test_read2_failure_bails_leaving_a_lit_head_unscrubbed(tmp_path, monkeypatch, logger):
+    """BL-01 half 1: the bail is real and it skips the scrub.
+
+    Post-reorder the read-#2 guard returns ~30 lines ABOVE ``scrub_stale``, so a
+    transient failure leaves a disconnected-but-STILL-LIT head powered on. That is
+    only safe if the caller can tell this happened -- hence the bool.
+    """
+    backend = _apply_over_scripted_reads(
+        monkeypatch, tmp_path, logger,
+        [_heads(False), RuntimeError("transient X error mid-apply")])
+
+    assert backend.applied is False, "a read-#2 failure is a BAIL, not a completed apply"
+    assert backend.offs == [], "the bail returns above scrub_stale; the lit head stays lit"
+
+
+def test_completed_applies_report_true(tmp_path, monkeypatch, logger):
+    """BL-01: the non-bail paths must report True or the loop never absorbs anything."""
+    backend = _apply_over_scripted_reads(
+        monkeypatch, tmp_path, logger, [_heads(False), _heads(False)])
+
+    assert backend.applied is True
+    assert backend.offs == ["HDMI-1"], "sanity: this IS the completed-apply path"
+
+
+def test_apply_bail_does_not_freeze_change_detection(tmp_path, monkeypatch, logger):
+    """BL-01 half 2 + WR-01: a bail must not absorb the hash and must not settle.
+
+    This is the phantom-monitor regression in full. Pre-fix, ``_apply_if_changed``
+    could not distinguish a bail from a completed apply, so it unconditionally
+    froze ``settled = topology_hash(...)``. The head is still lit, so
+    ``topology_hash_from_outputs`` keeps including it, the digest never changes
+    again, and NO further apply fires until another physical event -- a phantom
+    dwm monitor that sticks forever.
+    """
+    world = BounceWorld()
+    backend = ScenarioBackend(world)
+    coord = _SettleSpy()
+    monkeypatch.setattr(watch.time, "sleep", lambda s: None)
+    # HDMI-1 unplugged but its CRTC STILL LIT -- precisely the state the scrub exists
+    # to heal, and the state that poisons the digest if it is never healed.
+    world.hpd("HDMI-1", False)
+
+    def _fail_read_2(i):
+        if i == 2:
+            raise RuntimeError("transient X error mid-apply")
+    _wire_apply_seams_scripted(monkeypatch, world, backend, _fail_read_2)
+    monkeypatch.setattr(watch, "topology_hash",
+                        lambda logger=None: topology_hash_from_outputs(world.outs))
+
+    env, churn = _bounce_env(tmp_path), _churn()
+    stale = "topology-hash-from-before-the-unplug"
+    got = watch._apply_if_changed(env, logger, stale, churn, True, coord)
+
+    # (a) the head really is left disconnected-but-lit by the bail
+    assert world.outs["HDMI-1"].current_mode is not None
+    assert ("output_off", "HDMI-1") not in world.ops
+    # (b) ... so the loop MUST NOT absorb the hash, or nothing ever heals it
+    assert got == stale, "a bailed apply must not freeze the topology hash"
+    assert got != topology_hash_from_outputs(world.outs), (
+        "absorbing here is the phantom-monitor bug: the digest would never move again")
+    # WR-01: never run the mutating settle hook on an unconfirmed observation.
+    assert coord.calls == 0, "on_settled must not run when apply_once bailed"
+
+    # (c) and the retry that the un-absorbed hash guarantees DOES heal the head
+    healed = watch._apply_if_changed(env, logger, got, churn, True, coord)
+    assert ("output_off", "HDMI-1") in world.ops, "the retry powers the stale head off"
+    assert world.outs["HDMI-1"].current_mode is None
+    assert healed == topology_hash_from_outputs(world.outs), (
+        "a COMPLETED apply over a healed topology is absorbed normally")
+    assert coord.calls == 1, "the COMPLETED retry apply does settle"

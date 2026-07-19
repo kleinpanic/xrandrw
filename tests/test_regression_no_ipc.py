@@ -223,6 +223,7 @@ def _drive(monkeypatch, fake, script, topo, events):
 
     def _apply(env, logger, event_source):
         events.append(("apply", event_source))
+        return True  # BL-01: apply_once's contract is `-> bool`; honour it in the fake
     monkeypatch.setattr(watch, "apply_once", _apply)
 
     pipe = {}

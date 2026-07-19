@@ -146,7 +146,24 @@ def _place_externals(st: dict[str, dict], exts: list[Output], primary_name: str,
         backend.auto_pos(connector, rel_opt, anchor_connector, logger)
         backend.rotate_left_if_portrait(connector, outs[connector], logger)
 
-def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = "manual") -> None:
+def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = "manual") -> bool:
+    """Run one full apply pass. Returns True IFF a complete apply ran.
+
+    The return value is LOAD-BEARING for the watch loop (BL-01, 14-08). Every
+    early return here is a BAIL on an unknown or unusable topology -- the lock was
+    refused, another apply owns it, or a read failed -- and in every one of those
+    cases the daemon has NOT healed anything. `_apply_if_changed` must be able to
+    tell a bail from a completed apply, because on a bail it must NOT absorb the
+    new topology hash: absorbing it freezes change detection on an unhealed state
+    and no further apply fires until the next physical event (the Phase-4.1
+    phantom-monitor bug, reintroduced when the scrub moved below read #2 -- the
+    read-#2 bail now returns 33 lines BEFORE scrub_stale, so a transient failure
+    leaves a disconnected-but-lit head powered on forever).
+
+    True  == a full apply completed (including the legitimate "no connected
+             outputs" path, which scrubs and reapplies the wallpaper).
+    False == bailed; the caller must treat the topology as unknown/unhealed.
+    """
     lockfile = env["LOCKFILE"]
     # HARD-02: open the apply-lock with O_NOFOLLOW; a symlinked lock path (CWE-59) raises ELOOP.
     try:
@@ -155,14 +172,14 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
         if e.errno == errno.ELOOP:
             logev(logger, logging.WARNING, "lock_symlink_refused",
                   "apply-lock path is a symlink; refusing to run", lockfile=str(lockfile))
-            return
+            return False  # refused the lock -> nothing applied
         raise
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         loge(logger, logging.INFO, "apply_skip", "Another apply is running")
         os.close(fd)
-        return
+        return False  # another daemon owns the apply; WE applied nothing
 
     # HARD-03/03a lock-order invariant: the apply-lock is held OUTER (acquired above), the
     # state-lock INNER (acquired below around the load_state->save_state span). We NEVER acquire
@@ -177,7 +194,7 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
             outs = read_xrandr(logger)
         except Exception as e:
             logev(logger, logging.ERROR, "xrandr_unavail", "xrandr not available", error=str(e))
-            return
+            return False  # topology unknown
 
         logev(logger, logging.INFO, "apply_start", "apply: start", source=event_source)
 
@@ -189,7 +206,7 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
             read_edids(outs, logger)
         except Exception as e:
             logev(logger, logging.ERROR, "xrandr_unavail", "xrandr read failed mid-apply", error=str(e))
-            return
+            return False  # topology unknown; NOTHING below (incl. scrub_stale) has run
 
         # Power off any newly disconnected heads only (avoid wiping transforms on active
         # heads). THIS RUNS ON READ #2, NOT READ #1 (moved 14-08) -- do not move it back.
@@ -218,10 +235,21 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
         # disagree shrinks from ~1.5 s to ~10 ms.
         #
         # Position is BEFORE the `if not connected` early-return, so the all-disconnected
-        # apply_none path still scrubs exactly as it did before the move. A read-#2 failure
-        # now issues no --off at all -- a deliberate improvement: a failed read means the
-        # topology is unknown, and powering heads off on unknown topology is precisely the
-        # defect being fixed.
+        # apply_none path still scrubs exactly as it did before the move.
+        #
+        # CONSEQUENCE OF THE MOVE, AND WHY apply_once RETURNS A BOOL (BL-01). A read-#2
+        # failure bails ~30 lines ABOVE this call, so it now issues no --off at all. That
+        # is NOT self-evidently an improvement, and an earlier revision of this comment
+        # wrongly called it "a deliberate improvement" -- leaving that claim would re-teach
+        # the wrong lesson. Pre-move the scrub ran BEFORE the second read, so a transient
+        # read-#2 failure still powered off a disconnected-but-lit head. Skipping the scrub
+        # on an unknown topology is only safe BECAUSE the bail returns False and the watch
+        # loop therefore refuses to absorb the new hash (watch.py) and re-applies. Without
+        # that gate this skip is the Phase-4.1 phantom-monitor bug: the head stays lit,
+        # topology_hash keeps including it, the digest never changes again, and no further
+        # apply fires until another physical event -- a phantom dwm monitor forever.
+        # The bool and this ordering are load-bearing TOGETHER; do not keep one without
+        # the other.
         scrub_stale(outs, logger, backend)
 
         connected = [o for o in outs.values() if o.connected]
@@ -229,7 +257,7 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
             loge(logger, logging.INFO, "apply_none", "no connected outputs found")
             reapply_wallpaper(env, logger)
             logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
-            return
+            return True  # a complete apply: the scrub ran and the wallpaper was reapplied
 
         # Config-driven device profile override (PROF-01): a matched LAYOUT_* profile assembles
         # a byte-equivalent xrandr argv and early-returns BEFORE the state-lock/placement path, so
@@ -243,7 +271,7 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
             reapply_wallpaper(env, logger)
             remap_touch(env, {o.name for o in connected}, logger)
             logev(logger, logging.INFO, "apply_done", "apply: done (profile)", source=event_source)
-            return
+            return True
 
         # HARD-03: single state-lock span wrapping the entire load_state -> mutate -> save_state
         # read-modify-write, so a concurrent set_pref cannot interleave and lose an update.
@@ -279,6 +307,7 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
         reapply_wallpaper(env, logger)
         remap_touch(env, {o.name for o in connected}, logger)
         logev(logger, logging.INFO, "apply_done", "apply: done", source=event_source)
+        return True
     finally:
         os.close(fd)  # closing the fd releases the apply-lock
 

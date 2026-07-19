@@ -48,7 +48,26 @@ def _apply_if_changed(env: dict[str, str], logger: logging.Logger,
         return last_hash
     src = "randr_event" if got_event else "slow_poll"
     logev(logger, logging.INFO, "watch_apply", "apply on topology change", source=src)
-    apply_once(env, logger, event_source=src)
+    applied = apply_once(env, logger, event_source=src)
+    if not applied:
+        # BL-01: apply_once BAILED (lock refused / another apply running / either xrandr
+        # read failed). The topology is UNKNOWN and certainly unhealed -- in particular a
+        # read-#2 bail returns above scrub_stale, so a disconnected-but-lit head is still
+        # powered on. Absorbing the new hash here would freeze change detection on that
+        # state forever (no further apply until another physical event = a phantom dwm
+        # monitor that never goes away). Returning the OLD hash means the next wakeup
+        # still sees a difference and retries.
+        #
+        # We also do NOT run the settle hook (WR-01). With CRTC-liveness `cur`, a
+        # transiently dark read is a `removed` edge; on a bail that edge is an artefact of
+        # an observation we could not confirm. A spurious `removed` records windows dwm
+        # never evacuated, and the next settle sees `returned` and runs _restore_returned
+        # -- whose plan_restore UNCONDITIONALLY re-emits the saved tag bitmask, silently
+        # resetting a tag the user changed since the snapshot. Never mutate window state
+        # off an unconfirmed observation.
+        logev(logger, logging.INFO, "watch_apply_incomplete",
+              "apply did not complete; not absorbing topology hash", source=src)
+        return last_hash
     # Absorb our own mutations: the apply's xrandr commands emit RandR events; re-read the
     # settled topology so the loop doesn't chase its own change into a redundant 2nd apply.
     settled = topology_hash(logger)
