@@ -22,8 +22,8 @@ dependencies = ["python-xlib>=0.31"]
 [project.optional-dependencies]
 journald = ["systemd-python"]
 wallpaper = ["Pillow"]
-test = ["pytest"]
-dev = ["pytest", "ruff==0.15.*", "vulture>=2.11", "build"]
+test = ["pytest", "pytest-cov>=5"]
+dev = ["pytest", "pytest-cov>=5", "ruff==0.15.*", "vulture>=2.11", "build"]
 
 [project.scripts]
 xrandrw = "xrandrw.cli:main"
