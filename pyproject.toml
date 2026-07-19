@@ -56,3 +56,14 @@ addopts = "-m 'not functional'"
 markers = [
   "functional: real Xephyr+Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm, ERRORs (not skips) on CI",
 ]
+
+[tool.coverage.run]
+# TEST-07 M5: `branch` is DELIBERATELY NOT set here. A global branch flag would turn
+# the scoped 3-module CI gate (dwmipc/windows/relocate, LINE-based) into a branch
+# gate and could fail 95-100%-LINE modules on untouched code. Branch is opt-in
+# per-run via `--cov-branch` on the WHOLE-PACKAGE ratchet ONLY (see ci.yml coverage).
+source = ["xrandrw"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true

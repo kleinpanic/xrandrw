@@ -68,19 +68,63 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      # TEST-03 gate + TEST-04 headless evidence. This SINGLE run executes the
-      # entire test suite -- including the fake-AF_UNIX dwm-ipc server, the
-      # mocked-Xlib seam, and the fake-/proc functional tests -- with NO X server,
-      # NO dwm, and NO HDMI attached, then FAILS the build if combined coverage of
-      # the three new window-mgmt modules drops below 90%. The plain multi-version
-      # `test` matrix stays on bare `pytest -q` so the coverage plugin never gates
-      # it; the floor is enforced here on a single Python version.
-      - name: Coverage gate (new window-mgmt modules, --cov-fail-under=90)
+      # TEST-03/TEST-07 gate + TEST-04 headless evidence. This runs the entire
+      # suite -- including the fake-AF_UNIX dwm-ipc server, the mocked-Xlib seam,
+      # and the fake-/proc functional tests -- with NO X server, NO dwm, and NO
+      # HDMI attached. TWO gates run:
+      #   (1) SCOPED gate: the three window-mgmt modules (dwmipc/windows/relocate),
+      #       LINE-based (NO --cov-branch), raised from 90 -> 95 (measured 97.07%).
+      #       Kept LINE-only on purpose (M5): enabling branch here could fail
+      #       95-100%-LINE modules on untouched branches -- see [tool.coverage.run]
+      #       in pyproject (branch is NOT set globally).
+      #   (2) WHOLE-PACKAGE ratchet: `--cov-branch --cov-fail-under=85`. 85 is the
+      #       honest LINE ratchet floor (whole-package LINE was 83% before plan
+      #       14-02, now 91.12%). Branch is MEASURED here at 82.75% (combined
+      #       line+branch = 89.19%), reported but not aspirationally floored.
+      # The plain multi-version `test` matrix stays on bare `pytest -q` so the
+      # coverage plugin never gates it; the floors are enforced here on one Python.
+      - name: Coverage gate (scoped LINE >=95; whole-package ratchet --cov-branch --cov-fail-under=85)
         run: |
           python -m venv .venv
           . .venv/bin/activate
           pip install -e ".[test]"
-          pytest --cov=xrandrw.dwmipc --cov=xrandrw.windows --cov=xrandrw.relocate --cov-report=term-missing --cov-fail-under=90
+          # (1) scoped LINE gate -- no --cov-branch
+          pytest --cov=xrandrw.dwmipc --cov=xrandrw.windows --cov=xrandrw.relocate --cov-report=term-missing --cov-fail-under=95
+          # (2) whole-package ratchet -- LINE floor 85, branch measured/reported
+          pytest --cov=xrandrw --cov-branch --cov-report=term-missing --cov-fail-under=85
+
+  cli-smoke:
+    # CI-03: prove the INSTALLED console-script actually runs -- `pip install .`
+    # (a real build+install, not editable) then invoke the real `xrandrw` entry
+    # point, asserting exit 0. This catches packaging/entry-point regressions that
+    # `import xrandrw.cli` alone cannot. Read-only flags only: `--list-state` and
+    # `--window-state` are X-independent; `--print` (xrandr --query) needs a
+    # display, so it runs under a THROWAWAY Xvfb via `xvfb-run -a` (auto display
+    # >= :99, never the user's :0). `--daemon`/`--watch` are NEVER smoked (they
+    # block). T-14-04/T-14-11: `permissions: contents: read`, no secrets, no
+    # blocking modes.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install Xvfb + xrandr client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb x11-xserver-utils
+      - name: pip install . and run the real console-script (exit 0)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install .
+          # X-independent read-only diagnostics:
+          xrandrw --list-state
+          xrandrw --window-state
+          # --print shells out to `xrandr --query`; give it a throwaway X server:
+          xvfb-run -a xrandrw --print
 
   test:
     runs-on: ubuntu-latest

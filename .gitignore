@@ -7,3 +7,6 @@ __pycache__/
 *.pyc
 .planning/
 CLAUDE.md
+# transient coverage artifacts (pytest-cov json/data written by the CI gates)
+.coverage
+coverage-*.json
