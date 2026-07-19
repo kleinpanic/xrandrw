@@ -17,6 +17,7 @@ from xrandrw.state import load_state, save_state, ensure_profile, get_profile, s
 from xrandrw.apply import apply_once, _sd_notify, _watchdog_thread
 from xrandrw.watch import stop_evt, watch_loop, _install_signals
 from xrandrw.relocate import RelocationCoordinator
+from xrandrw.windows import capture_windows
 
 SIDES_VALID = ("right-of", "left-of", "above", "below")
 
@@ -59,6 +60,37 @@ def set_pref(env: Dict[str, str], output_or_id: str, side: str, logger: logging.
 def list_state():
     st = load_state()
     print(json.dumps(st, indent=2, sort_keys=True))
+
+def window_state(env: Dict[str, str], logger: logging.Logger) -> int:
+    # WM-07 SC3: read-only diagnostic of the window-management feature state.
+    # Degrades cleanly on every path (off / no-endpoint / available) and always
+    # exits 0 -- never crashes. `displaced` is always [] here: this one-shot has
+    # no live coordinator, so there is no displaced set to report; the key stays
+    # present for a stable schema.
+    enabled = env.get("WINDOW_MANAGEMENT") == "1"
+    dwmipc_available = dwmipc.available(dwmipc.DEFAULT_SOCK_PATH, timeout=_RELOCATE_IPC_TIMEOUT)
+    result = {
+        "enabled": enabled,
+        "dwmipc_available": dwmipc_available,
+        "captured": [],
+        "displaced": [],
+    }
+    if not enabled:
+        result["reason"] = "window management disabled; set WINDOW_MANAGEMENT=1 to enable"
+    elif not dwmipc_available:
+        result["reason"] = ("dwm-ipc endpoint unavailable; needs a dwm built with the "
+                            "mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock")
+    else:
+        try:
+            recs = capture_windows(timeout=_RELOCATE_IPC_TIMEOUT, logger=logger)
+            result["captured"] = [r.to_dict() for r in recs]
+        except Exception as e:
+            # capture_windows already swallows DwmIpcUnavailable and guards its
+            # live X read; wrap defensively so any unexpected error still exits 0.
+            logev(logger, logging.WARNING, "window_state_capture_fail",
+                  "window-state capture failed; leaving captured empty", error=str(e))
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 def _event_source_from_env() -> str:
     if os.getenv("ACTION") or os.getenv("OUTPUT"):
@@ -127,6 +159,8 @@ def main():
     ap.add_argument("--set-pref", nargs=2, metavar=("OUTPUT_OR_ID", "SIDE"),
                     help="set preferred side: right-of|left-of|above|below")
     ap.add_argument("--list-state", action="store_true", help="dump placement state JSON")
+    ap.add_argument("--window-state", action="store_true",
+                    help="print a JSON diagnostic of the window-mgmt feature state")
     args, extra = ap.parse_known_args()
     if extra:
         logev(logger, logging.DEBUG, "cli_extra", "ignoring extra CLI args",
@@ -138,6 +172,8 @@ def main():
     if args.list_state:
         list_state()
         return 0
+    if args.window_state:
+        return window_state(env, logger)
     if args.set_pref:
         set_pref(env, args.set_pref[0], args.set_pref[1], logger)
         return 0
