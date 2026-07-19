@@ -49,3 +49,13 @@ PREF_DEFAULT_SIDE=right-of
 # Pi4 users: uncomment to reproduce the pre-Phase-5 hardcoded DSI-1/HDMI-1 layout.
 # LAYOUT_PI4="DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
 
+# Window management (dwm-ipc). Opt-in, default off.
+# When enabled, on display UNPLUG xrandrw relocates the removed display's windows
+# onto a surviving display and, on REPLUG, moves the SAME process's window back
+# where it was — keyed by PID (Apple-like relocate-on-unplug / restore-on-replug).
+# REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
+# On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
+# feature is SILENTLY capability-gated OFF and your display layout is unaffected.
+# Inspect the feature's live state with:  xrandrw --window-state
+# WINDOW_MANAGEMENT=1
+

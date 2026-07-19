@@ -48,6 +48,7 @@ pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 | `xrandrw --print` | Print `xrandr --query` output and exit. |
 | `xrandrw --set-pref OUTPUT_OR_ID SIDE` | Set a display's preferred side: `right-of`, `left-of`, `above`, `below`. |
 | `xrandrw --list-state` | Dump the placement state JSON. |
+| `xrandrw --window-state` | Print a JSON diagnostic of the window-mgmt feature state — enabled, dwm-ipc availability, and captured windows. |
 
 ## Configuration
 
@@ -67,9 +68,47 @@ variable of the same name.
 | `LOCKFILE` | Apply-lock path. |
 | `PREF_DEFAULT_SIDE` | Default side for new/unknown monitors. |
 | `EXCESS_WINDOW_SEC` / `EXCESS_THRESHOLD` | Churn-backoff window and threshold. |
+| `WINDOW_MANAGEMENT` | Opt-in dwm-ipc window relocation on hotplug (`0` = off default, `1` = on). See [Window management (dwm-ipc)](#window-management-dwm-ipc). |
 
 See [`xrandrw.conf.sample`](xrandrw.conf.sample) for an annotated template —
 copy it to `~/.config/xrandrw.conf` and edit.
+
+## Window management (dwm-ipc)
+
+An opt-in feature (default off) that gives display hotplug an Apple-like feel: on
+unplug, xrandrw relocates the removed display's windows onto a surviving display,
+and on replug it moves the **same process's** window back where it was — keyed by
+PID, so a re-launched program isn't confused for the original.
+
+**Requirement.** This needs a dwm built with the
+[mihirlad55/dwm-ipc](https://github.com/mihirlad55/dwm-ipc) patch, which exposes a
+control socket at `/tmp/dwm.sock`. On any window manager without that IPC endpoint
+(vanilla dwm, i3, RPi4 stock dwm) the feature is **silently capability-gated off**
+and your display layout is entirely unaffected — nothing to configure, nothing to
+break.
+
+**Enable it** by setting `WINDOW_MANAGEMENT=1` (env or config file). Effective-on
+is `WINDOW_MANAGEMENT=1` **and** a live dwm-ipc endpoint; either missing means the
+subsystem is a no-op.
+
+**Inspect it** with the read-only diagnostic:
+
+```bash
+xrandrw --window-state
+```
+
+which prints JSON `{enabled, dwmipc_available, captured, displaced}` and exits 0
+even when the feature is off or no endpoint is present (never a traceback).
+
+**Limitations.**
+
+- **Fullscreen is not reapplied.** A window's fullscreen state is captured but not
+  restored (Phase-10 IN-03); a formerly-fullscreen window returns to its saved
+  monitor/tag/floating-state/geometry but not its fullscreen flag.
+- **Cross-monitor relocation needs ≥ 2 heads** — with a single output there is
+  nowhere to relocate to.
+- **Monitor targeting is relative.** Restore uses dwm's relative `tagmon`, so the
+  target monitor is derived from the current topology, not an absolute index.
 
 ## systemd user service
 
