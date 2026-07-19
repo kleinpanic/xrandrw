@@ -110,6 +110,31 @@ even when the feature is off or no endpoint is present (never a traceback).
 - **Monitor targeting is relative.** Restore uses dwm's relative `tagmon`, so the
   target monitor is derived from the current topology, not an absolute index.
 
+## Testing & quality gates
+
+The window-management subsystem is exercised by a **display-free** functional test
+suite: the full capture→restore lifecycle is driven against a **real `AF_UNIX`
+fake dwm-ipc server** that speaks the DWM-IPC wire protocol, a **mocked Xlib** seam,
+and a **fake `/proc`**. Because none of it needs a live display, the entire suite
+runs **headless** in CI with **no X server, no dwm, and no second monitor attached**.
+
+CI enforces four gates:
+
+- **`test`** — the full `pytest` suite across Python 3.9 / 3.11 / 3.13.
+- **`coverage`** — a coverage gate (`--cov-fail-under=90`) scoped to the three new
+  window-mgmt modules (`xrandrw.dwmipc`, `xrandrw.windows`, `xrandrw.relocate`). This
+  single run is also the headless evidence above.
+- **`lint`** / **`lint-strict`** — the baseline `ruff check .`, plus an expanded
+  ruleset (`B,SIM,PERF,C90,UP,RUF`) on the three new modules.
+- **`deadcode`** — `vulture` dead-code analysis over `src/`.
+
+**Deferred (acknowledged follow-up):** expanding the `B,SIM,PERF,C90,UP,RUF` ruleset
+across **all** of `src/` is intentionally **deferred**, not done in this milestone. It
+is ~187 hits, overwhelmingly `UP` annotation-modernization on shipped v0.1.0 code
+(plus the annotation-only hits in `watch.py` / `cli.py`). It is deferred to avoid
+churning stable code during the v0.2.0 window-management work, and is tracked as a
+backlog item so the scope choice is explicit rather than silent.
+
 ## systemd user service
 
 The repo ships a `--user` unit that runs `xrandrw --daemon` with `Restart=always`
