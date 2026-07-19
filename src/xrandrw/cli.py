@@ -6,8 +6,10 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from typing import Dict, List
 
+from xrandrw import dwmipc
 from xrandrw.config import load_config
 from xrandrw.logging_utils import _setup_logging, logev, wait_for_x
 from xrandrw.xrandr import read_xrandr, read_edids
@@ -17,6 +19,16 @@ from xrandrw.watch import stop_evt, watch_loop, _install_signals
 from xrandrw.relocate import RelocationCoordinator
 
 SIDES_VALID = ("right-of", "left-of", "above", "below")
+
+# WR-03 boot-seed retry budget: dwm-ipc may not be up yet when the daemon boots
+# (e.g. dwm still starting). We wait a bounded time for the endpoint before
+# seeding so the seed captures the FULL pre-unplug topology; never an infinite
+# wait (mirrors wait_for_x's bounded poll).
+_SEED_RETRIES = 20      # ~10s total
+_SEED_DELAY = 0.5       # seconds between availability probes
+# Modest per-call dwm-ipc timeout for the relocation coordinator (IN-01): keeps
+# each synchronous restore round-trip short so it cannot stall the watch loop.
+_RELOCATE_IPC_TIMEOUT = 0.25
 
 def set_pref(env: Dict[str, str], output_or_id: str, side: str, logger: logging.Logger):
     if side not in SIDES_VALID:
@@ -53,22 +65,38 @@ def _event_source_from_env() -> str:
         return "xplugd"
     return "manual"
 
-def _seeded_coordinator(env: Dict[str, str], logger: logging.Logger) -> RelocationCoordinator:
+def _seeded_coordinator(env: Dict[str, str], logger: logging.Logger,
+                        *, retries: int = _SEED_RETRIES,
+                        delay: float = _SEED_DELAY) -> RelocationCoordinator:
     # BOOT-SEED (B2): construct the relocation coordinator and seed it ONCE while
     # all outputs are still connected (after boot apply, before watch_loop). The
     # watch hook fires only AFTER a topology CHANGE settles, so without this seed
     # the FIRST unplug of the session takes on_settled's `_prev_connected is None`
     # branch (seed + return, no `removed`), silently missing the first unplug so
     # replug restores nothing. Seeding here populates _prev_connected + _snapshot
-    # with the correct pre-unplug placement. It self-gates: on_settled is a silent
-    # no-op unless _enabled() (config AND dwmipc.available()), so a machine with no
-    # dwm-ipc endpoint is unaffected. Guarded so a seed fault never breaks boot.
-    coordinator = RelocationCoordinator()
+    # with the correct pre-unplug placement.
+    coordinator = RelocationCoordinator(ipc_timeout=_RELOCATE_IPC_TIMEOUT)
+    # WR-03: if dwm-ipc isn't up yet at boot, on_settled is a silent no-op
+    # (_enabled() False) and _prev_connected stays None -- a LATER settle would
+    # then seed off an ALREADY-REDUCED topology, silently reintroducing the B2
+    # first-unplug miss. Wait a BOUNDED time for the endpoint before seeding.
+    for _ in range(max(1, retries)):
+        if dwmipc.available(dwmipc.DEFAULT_SOCK_PATH, timeout=_RELOCATE_IPC_TIMEOUT):
+            break
+        if stop_evt.is_set():
+            break
+        time.sleep(delay)
     try:
         coordinator.on_settled(env, logger)
     except Exception as e:
         logev(logger, logging.WARNING, "relocate_seed_fail",
               "relocation seed failed; continuing without a seeded baseline", error=str(e))
+    if coordinator._prev_connected is None:
+        # dwm-ipc never came up (or feature disabled): accept and continue. The
+        # first unplug this session may not be restorable, but display layout is
+        # unaffected and later cycles still self-heal once dwm-ipc is present.
+        logev(logger, logging.INFO, "relocate_seed_deferred",
+              "dwm-ipc unavailable at boot; seed deferred (first unplug may not restore)")
     return coordinator
 
 def main():

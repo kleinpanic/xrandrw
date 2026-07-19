@@ -239,7 +239,8 @@ class RelocationCoordinator:
         self._config_enabled = config_enabled
         # Small per-window IPC timeout so a synchronous restore cannot stall the
         # single-threaded watch select() loop (W2 accepted tradeoff); threaded
-        # into EVERY dwmipc call below. cli.py (Plan 04) may pass a tighter value.
+        # into EVERY dwmipc call below (including capture_windows via _safe_capture,
+        # AUDIT-B). cli.py passes a modest override (_RELOCATE_IPC_TIMEOUT, IN-01).
         self._ipc_timeout = ipc_timeout
         self._displaced: "dict[tuple[int, int], object]" = {}
         self._snapshot: "dict[tuple[int, int], object]" = {}
