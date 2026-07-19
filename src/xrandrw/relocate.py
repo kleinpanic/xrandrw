@@ -441,6 +441,27 @@ class RelocationCoordinator:
         Uses the LAST snapshot (taken before the disruption) -- does NOT
         re-capture now (dwm has already evacuated). We do not fight dwm's
         evacuation; we only remember which PIDs were displaced from where.
+
+        KNOWN LIMITATION -- records are CONNECTOR-keyed, not monitor-identity
+        keyed (WR-06). We store ``rec.output`` (e.g. "HDMI-1") and
+        :meth:`_restore_returned` matches on ``rec.output in returned``.
+        ``rec.edid`` IS captured but is NEVER consulted. So if you unplug monitor
+        A from HDMI-1 and plug a DIFFERENT monitor B into the same port, B's
+        return looks identical to A's and A's windows are tagmon'd onto B. This
+        is pre-existing, but CRTC-liveness edges (14-08) create ``_displaced``
+        entries on strictly more occasions, so the exposure GREW.
+
+        Why there is no EDID guard here rather than an oversight: the obvious
+        check (``rec.edid == outs[rec.output].edid_sha1`` when both are known)
+        cannot fire. ``on_settled``'s ``outs`` comes from ``RandRReader.read()``,
+        and ``randr_resources_to_outputs`` never populates ``edid_sha1`` -- only
+        ``read_edids`` does, and the coordinator does not call it (``rec.edid``
+        exists only because ``capture_windows`` reads EDIDs on its OWN read).
+        Adding the guard therefore requires an extra EDID round-trip on the
+        settle path plus a new live-X call site in this module. That is a
+        behaviour change, not a gap fix, so it is deferred rather than shipped as
+        a check that silently never runs -- dead code shaped like protection is
+        worse than a documented limitation.
         """
         for key, rec in list(self._snapshot.items()):
             if rec.output in removed:
@@ -455,6 +476,11 @@ class RelocationCoordinator:
         SIGTERM mid-cycle stops after the current window so shutdown is prompt
         even against a slow-but-connected dwm; remaining windows stay displaced
         for a later cycle.
+
+        The ``rec.output in returned`` match is by CONNECTOR NAME and is NOT
+        monitor-identity stable -- a different monitor in the same port inherits
+        the previous monitor's windows. See :meth:`_record_displaced` for why the
+        EDID guard is deferred rather than implemented (WR-06).
         """
         t0 = time.monotonic()
         dropped = skipped = 0
