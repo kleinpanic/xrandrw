@@ -136,6 +136,44 @@ def test_conf_file_malformed_numeric_warns(monkeypatch, isolated_config, tmp_pat
     assert any("POLL_INTERVAL" in w for w in warnings)
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("1", "1"),
+        ("true", "1"),
+        ("yes", "1"),
+        ("0", "0"),
+        ("bogus", "0"),
+        ("", "0"),
+    ],
+)
+def test_window_management_coerce(monkeypatch, isolated_config, raw, expected):
+    monkeypatch.setenv("WINDOW_MANAGEMENT", raw)
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == expected
+
+
+def test_window_management_default_off(isolated_config):
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == "0"
+
+
+def test_window_management_precedence(monkeypatch, isolated_config, tmp_path):
+    sys_conf = tmp_path / "sys.conf"
+    user_conf = tmp_path / "user.conf"
+    sys_conf.write_text("WINDOW_MANAGEMENT=1\n")  # user conf silent
+    user_conf.write_text("HIDPI_WIDTH=1500\n")
+    monkeypatch.setattr(config, "CONF_SYS", sys_conf)
+    monkeypatch.setattr(config, "CONF_USER", user_conf)
+
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == "1", "sys conf value survives where user conf is silent"
+
+    monkeypatch.setenv("WINDOW_MANAGEMENT", "0")
+    env2, _ = load_config()
+    assert env2["WINDOW_MANAGEMENT"] == "0", "process env must beat conf files"
+
+
 def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
     monkeypatch.delenv("LOCKFILE", raising=False)
     env, _ = load_config()
