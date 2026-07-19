@@ -25,7 +25,7 @@ def _install_signals(logger: logging.Logger):
     signal.signal(signal.SIGTERM, _sig)
 
 def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
-                      last_hash: str, churn: dict, got_event: bool) -> str:
+                      last_hash: str, churn: dict, got_event: bool, coordinator=None) -> str:
     # Decision logic isolated from the blocking select() so it is unit-testable
     # with topology_hash/apply_once mocked and no live Display.
     cur = topology_hash(logger)
@@ -52,9 +52,21 @@ def _apply_if_changed(env: Dict[str, str], logger: logging.Logger,
     apply_once(env, logger, event_source=src)
     # Absorb our own mutations: the apply's xrandr commands emit RandR events; re-read the
     # settled topology so the loop doesn't chase its own change into a redundant 2nd apply.
-    return topology_hash(logger)
+    settled = topology_hash(logger)
+    # Phase-10 additive hook (WM-06/WM-08): the relocation coordinator runs ONLY on this
+    # post-apply branch, AFTER the settled hash is frozen. It must NOT alter the returned
+    # hash or add a second topology read (preserves the no-double-apply invariant), and a
+    # coordinator fault must never break the watch loop -- guarded + swallowed. Default
+    # coordinator=None keeps the loop byte-for-byte identical for existing callers/tests.
+    if coordinator is not None:
+        try:
+            coordinator.on_settled(env, logger)
+        except Exception as e:
+            logev(logger, logging.WARNING, "relocate_hook_fail",
+                  "relocation hook raised; ignoring (display layout unaffected)", error=str(e))
+    return settled
 
-def watch_loop(env: Dict[str, str], logger: logging.Logger):
+def watch_loop(env: Dict[str, str], logger: logging.Logger, coordinator=None):
     slow_poll = int(env["POLL_INTERVAL"])  # D-06: safety-net timeout, not a tight loop
     churn = {
         "times": [],
@@ -107,7 +119,7 @@ def watch_loop(env: Dict[str, str], logger: logging.Logger):
                     d.next_event()
                     got_event = True
             if got_event or (xfd not in r):  # event burst OR slow-poll timeout fired
-                last = _apply_if_changed(env, logger, last, churn, got_event)
+                last = _apply_if_changed(env, logger, last, churn, got_event, coordinator)
     finally:
         signal.set_wakeup_fd(old_wakeup)
         os.close(rpipe)
