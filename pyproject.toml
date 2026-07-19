@@ -48,6 +48,11 @@ ignore_names = ["frame"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Deselect the real-dwm/X functional suite by DEFAULT so the fast unit runs
+# (`pytest -q`, the test/coverage CI jobs) never try to stand up Xvfb/Xephyr/dwm
+# -- the dedicated `functional` CI job opts back in with `pytest -m functional`,
+# which overrides this marker expression.
+addopts = "-m 'not functional'"
 markers = [
-  "functional: real Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm",
+  "functional: real Xephyr+Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm, ERRORs (not skips) on CI",
 ]

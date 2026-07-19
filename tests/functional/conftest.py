@@ -139,7 +139,8 @@ def _fetch_dwm_source(dest: Path) -> None:
             blob = r.read()
         with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
             root = tf.getnames()[0].split("/", 1)[0]
-            tf.extractall(dest.parent)  # noqa: S202 (trusted pinned suckless tarball)
+            extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            tf.extractall(dest.parent, **extra)  # noqa: S202 (trusted pinned suckless tarball)
         (dest.parent / root).rename(dest)
         return
     except Exception:
@@ -189,44 +190,79 @@ def _build_harness_dwm() -> str:
 
 # --- fixtures -----------------------------------------------------------------
 
+# The two Xinerama monitors the harness presents to dwm (side-by-side 1920x1080).
+# Tests mirror these into injected xrandrw Outputs, so keep them authoritative here.
+HARNESS_MONITORS = (
+    {"x": 0, "y": 0, "width": 1920, "height": 1080},      # dwm monitor 0 (left)
+    {"x": 1920, "y": 0, "width": 1920, "height": 1080},   # dwm monitor 1 (right)
+)
+
+
+def _wait_display(display: str) -> bool:
+    return _poll(lambda: subprocess.run(["xdpyinfo", "-display", display],
+                                        capture_output=True).returncode == 0)
+
+
 @pytest.fixture(scope="session")
 def x_display():
-    """L1 PRIMARY: a plain Xvfb carved into two dwm monitors via ``--setmonitor``.
+    """L1 PRIMARY: two side-by-side Xinerama monitors on a PLAIN runner.
 
-    Launches ``Xvfb :N -screen 0 3840x1080x24 +extension RANDR`` (N free, >= 99 --
-    never :0), polls ``xrandr --query`` until the server answers, then carves two
-    1920-wide RandR 1.5 monitors so dwm (Xinerama) sees >= 2 monitors. Yields the
-    ``:N`` display string; SIGTERM-reaps Xvfb on teardown.
+    Real dwm reads Xinerama, and it must see >= 2 DISTINCT monitors for the
+    cross-monitor ``tagmon`` / record-restore path to exercise. `xrandr
+    --setmonitor` on hosted Xvfb (RandR 1.6) does not reliably populate the
+    RandR->Xinerama bridge, so instead we nest a headless **Xephyr** (two
+    side-by-side ``-screen``s ``+xinerama``) inside a plain parent **Xvfb**. This
+    keeps the gating path root-free / Xorg-free / dummy-free / tty-free while
+    giving dwm a DETERMINISTIC 2-monitor Xinerama tree at (0,0) and (1920,0).
+    (A true ``Output.connected`` flip is out of scope for L1 -- see README /
+    the record-restore INJECTION tests.) Yields the Xephyr ``:N`` display;
+    SIGTERM-reaps both servers.
     """
-    _require_bins("Xvfb", "xrandr")
-    disp_n = _free_display()
-    display = f":{disp_n}"
-    assert display != ":0", "refusing to use the developer's live :0"
-    proc = subprocess.Popen(
-        ["Xvfb", display, "-screen", "0", "3840x1080x24", "+extension", "RANDR"],
+    _require_bins("Xvfb", "Xephyr", "xdpyinfo")
+    parent_n = _free_display()
+    parent = f":{parent_n}"
+    assert parent != ":0", "refusing to use the developer's live :0"
+    parent_proc = subprocess.Popen(
+        ["Xvfb", parent, "-screen", "0", "4000x1200x24"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    env = dict(os.environ, DISPLAY=display)
+    nested_proc = None
+    _prev_display = os.environ.get("DISPLAY")
     try:
-        ready = _poll(lambda: subprocess.run(["xrandr", "--query"], env=env,
-                                             capture_output=True).returncode == 0)
-        if not ready:
-            _unavailable(f"Xvfb {display} never became queryable")
-        # Carve two dwm monitors (RandR 1.5 -> Xinerama). On Xvfb --setmonitor
-        # can emit a harmless BadValue on stderr yet still register the monitor;
-        # we do NOT trust rc -- we verify via `xrandr --listmonitors` below.
-        for name, geom in (("DUMMY-L", "1920/508x1080/285+0+0"),
-                           ("DUMMY-R", "1920/508x1080/285+1920+0")):
-            subprocess.run(["xrandr", "--setmonitor", name, geom, "none"],
-                           env=env, capture_output=True)
-        got = _poll(lambda: subprocess.run(["xrandr", "--listmonitors"], env=env,
-                                           capture_output=True, text=True).stdout, tries=20)
-        n_mon = 0 if got is None else sum(got.count(n) for n in ("DUMMY-L", "DUMMY-R"))
-        if n_mon < 2:
-            _unavailable("xrandr --setmonitor did not produce two monitors")
+        if not _wait_display(parent):
+            _unavailable(f"parent Xvfb {parent} never came up")
+        child_n = _free_display()
+        display = f":{child_n}"
+        assert display != ":0"
+        nested_proc = subprocess.Popen(
+            ["Xephyr", display, "-ac", "-screen", "1920x1080",
+             "-screen", "1920x1080", "+xinerama"],
+            env=dict(os.environ, DISPLAY=parent),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if not _wait_display(display):
+            _unavailable(f"nested Xephyr {display} never came up")
+        # In-process Xlib (RelocationControl.focus/configure, WindowXReader) reads
+        # os.environ["DISPLAY"], so point it at OUR nested server -- never the dev's
+        # :0. Saved/restored on teardown so the change never leaks past the session.
+        os.environ["DISPLAY"] = display
+        # Confirm dwm will actually see two distinct Xinerama heads.
+        from Xlib import display as _xdisplay
+        _d = _xdisplay.Display(display)
+        try:
+            n_screens = len(_d.xinerama_query_screens().screens)
+        finally:
+            _d.close()
+        if n_screens < 2:
+            _unavailable(f"nested server exposed {n_screens} Xinerama screens (<2)")
         yield display
     finally:
-        _reap(proc)
+        if _prev_display is None:
+            os.environ.pop("DISPLAY", None)
+        else:
+            os.environ["DISPLAY"] = _prev_display
+        _reap(nested_proc)
+        _reap(parent_proc)
 
 
 @pytest.fixture(scope="session")

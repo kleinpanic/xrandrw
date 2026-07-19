@@ -14,15 +14,23 @@
             (repo commit b3eebba7c043482d454afc5c882f513fc1b157ad, tag v1.5.7)
             rebased onto dwm 6.5 (one context-drifted hunk in dwm.c/Makefile
             resolved) so it applies cleanly to 6.5 with NO fuzz.
-   - PLUS a small xrandrw-local addition: a `-s <socketpath>` command-line
-     flag in dwm's main() (see the dwm.c hunk). Upstream dwm-ipc has NO way to
-     set the socket path at launch -- it is the compile-time `ipcsockpath`
-     default `/tmp/dwm.sock`. The harness MUST bind a PRIVATE per-run socket
-     (never the world-writable `/tmp/dwm.sock`; T-14-01 / Pitfall 2), so this
-     flag lets the fixture launch `dwm -s "$DWM_SOCKET"` while the Python
-     client reads the SAME path from `$DWM_SOCKET` (dwmipc.DEFAULT_SOCK_PATH,
-     dwmipc.py:57). conftest.py asserts server and client agree on that private
-     path and that it is NOT `/tmp/dwm.sock`.
+   - PLUS two small xrandrw-local additions in dwm.c (see the dwm.c hunk):
+       (a) a `-s <socketpath>` command-line flag in dwm's main(). Upstream
+           dwm-ipc has NO way to set the socket path at launch -- it is the
+           compile-time `ipcsockpath` default `/tmp/dwm.sock`. The harness MUST
+           bind a PRIVATE per-run socket (never the world-writable
+           `/tmp/dwm.sock`; T-14-01 / Pitfall 2), so this flag lets the fixture
+           launch `dwm -s "$DWM_SOCKET"` while the Python client reads the SAME
+           path from `$DWM_SOCKET` (dwmipc.DEFAULT_SOCK_PATH, dwmipc.py:57).
+           conftest.py asserts server and client agree on that private path and
+           that it is NOT `/tmp/dwm.sock`.
+       (b) `focusonnetactive` behavior in clientmessage(): stock dwm's
+           _NET_ACTIVE_WINDOW handler only flags urgency, but xrandrw's
+           relocate.focus() TARGETS a client by sending _NET_ACTIVE_WINDOW and
+           then acts on dwm's selected client. The deployed dwm the window-mgmt
+           feature was validated against focuses on net-active; the harness dwm
+           must too, or focus-then-act cannot cross monitors. This makes the L1
+           harness represent the real deployment rather than stock dwm.
 
  SOCKET CONTRACT (T-14-01)
    dwm built from this diff MUST be launched as `dwm -s "$DWM_SOCKET"` with
@@ -88,7 +96,7 @@ diff -ruN a/config.mk b/config.mk
  CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=700L -DVERSION=\"${VERSION}\" ${XINERAMAFLAGS}
 diff -ruN a/dwm.c b/dwm.c
 --- a/dwm.c	2026-07-19 00:54:21.659342588 -0400
-+++ b/dwm.c	2026-07-19 00:54:21.667342541 -0400
++++ b/dwm.c	2026-07-19 01:13:22.113758521 -0400
 @@ -30,6 +30,7 @@
  #include <unistd.h>
  #include <sys/types.h>
@@ -219,7 +227,28 @@ diff -ruN a/dwm.c b/dwm.c
  }
  
  void
-@@ -977,6 +1015,25 @@
+@@ -526,8 +564,18 @@
+ 			setfullscreen(c, (cme->data.l[0] == 1 /* _NET_WM_STATE_ADD    */
+ 				|| (cme->data.l[0] == 2 /* _NET_WM_STATE_TOGGLE */ && !c->isfullscreen)));
+ 	} else if (cme->message_type == netatom[NetActiveWindow]) {
+-		if (c != selmon->sel && !c->isurgent)
+-			seturgent(c, 1);
++		/* focusonnetactive: xrandrw's relocate.focus() targets a client by
++		 * sending _NET_ACTIVE_WINDOW, so the harness dwm must actually FOCUS
++		 * (across monitors, unhiding a client on another tag) rather than only
++		 * flag urgency -- matching the deployed dwm the feature was validated on. */
++		if (c != selmon->sel) {
++			if (!ISVISIBLE(c)) {
++				c->mon->seltags ^= 1;
++				c->mon->tagset[c->mon->seltags] = c->tags;
++			}
++			focus(c);
++			restack(c->mon);
++		}
+ 	}
+ }
+ 
+@@ -977,6 +1025,25 @@
  	}
  }
  
@@ -245,7 +274,7 @@ diff -ruN a/dwm.c b/dwm.c
  void
  incnmaster(const Arg *arg)
  {
-@@ -1382,12 +1439,40 @@
+@@ -1382,12 +1449,40 @@
  void
  run(void)
  {
@@ -291,7 +320,7 @@ diff -ruN a/dwm.c b/dwm.c
  }
  
  void
-@@ -1521,6 +1606,18 @@
+@@ -1521,6 +1616,18 @@
  		drawbar(selmon);
  }
  
@@ -310,7 +339,7 @@ diff -ruN a/dwm.c b/dwm.c
  /* arg > 1.0 will set mfact absolutely */
  void
  setmfact(const Arg *arg)
-@@ -1611,9 +1708,38 @@
+@@ -1611,9 +1718,38 @@
  	XSelectInput(dpy, root, wa.event_mask);
  	grabkeys();
  	focus(NULL);
@@ -349,7 +378,7 @@ diff -ruN a/dwm.c b/dwm.c
  seturgent(Client *c, int urg)
  {
  	XWMHints *wmh;
-@@ -2013,10 +2139,18 @@
+@@ -2013,10 +2149,18 @@
  void
  updatetitle(Client *c)
  {
@@ -368,7 +397,7 @@ diff -ruN a/dwm.c b/dwm.c
  }
  
  void
-@@ -2145,8 +2279,10 @@
+@@ -2145,8 +2289,10 @@
  {
  	if (argc == 2 && !strcmp("-v", argv[1]))
  		die("dwm-"VERSION);

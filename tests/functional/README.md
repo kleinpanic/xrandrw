@@ -21,17 +21,32 @@ verify in three honestly-scoped layers:
 
 | Layer | Where | What it proves | Gating? |
 |-------|-------|----------------|---------|
-| **L1** | this suite, plain **Xvfb** + `xrandr --setmonitor` + real patched dwm | the full **control + capture** path against reality: focus-then-act, real cross-monitor `tagmon`, `tag`/`togglefloating`/`configure`, real `get_dwm_client` capture, dwm crash-safety, and the coordinator record→restore pipeline driven by **injecting** the removed/returned output sets | **YES** — `functional` CI job |
+| **L1** | this suite, headless **Xephyr-in-Xvfb** (two side-by-side Xinerama heads) + real patched dwm | the full **control + capture** path against reality: focus-then-act, real cross-monitor `tagmon`, `tag`/`togglefloating`/`configure`, real `get_dwm_client` capture, dwm crash-safety, and the coordinator record→restore pipeline driven by **injecting** the removed/returned output sets | **YES** — `functional` CI job |
 | **L2** | `functional-vkms` CI job, real **Xorg** + `xf86-video-dummy` (+ best-effort VKMS) | a best-effort attempt at a **true** output flip where it can matter | NO — `continue-on-error` |
 | **L3** | `14-05` live 2-monitor **HDMI** human-verify on real hardware | the ONLY place the true connect/disconnect → RandR-event → relocate → restore chain runs end-to-end | gates the v0.2.0 release |
 
 ## Honesty contract — what L1 does and does NOT prove
 
-**L1 proves control + capture against real dwm.** It stands up a plain `Xvfb`
-(no root, no `Xorg`, no dummy driver, no tty), uses `xrandr --setmonitor` (RandR
-1.5 → Xinerama) so the real dwm sees **≥ 2 monitors**, builds and runs a real
-dwm-ipc-patched dwm on a **private** socket, spawns real `xterm` windows, and
-asserts every `dwmipc` verb and capture read against what dwm actually reports.
+**L1 proves control + capture against real dwm.** It stands up a headless
+**Xephyr nested inside a plain `Xvfb`** (no root, no `Xorg`, no dummy driver, no
+tty), presenting **two side-by-side Xinerama heads** at `(0,0)` and `(1920,0)` so
+the real dwm sees **≥ 2 distinct monitors** deterministically (the RandR-1.6
+`xrandr --setmonitor` → Xinerama bridge is unreliable on hosted Xvfb, so it is
+not used). It builds and runs a real dwm-ipc-patched dwm on a **private** socket,
+spawns real `xterm` windows, and asserts every `dwmipc` verb and capture read
+against what dwm actually reports. The harness dwm carries `focusonnetactive`
+(see the `dwm-ipc.diff` header): stock dwm only flags urgency on
+`_NET_ACTIVE_WINDOW`, but `relocate.focus()` targets a client by sending it, so
+the harness matches the deployed dwm the feature was validated on.
+
+> **Finding surfaced by L1 (tracked for a follow-up, not fixed here — feature
+> behavior is out of scope for phase 14):** against real dwm, `configurerequest`
+> is monitor-RELATIVE (`c->x = m->mx + ev->x`) while
+> `RelocationControl.configure_geometry` sends the ABSOLUTE saved x, so restoring
+> a floating window's geometry onto a monitor whose origin x > 0 is offset /
+> centered by dwm. The injection test asserts the honored axes (monitor, floating
+> state, tag, y) and documents the x offset rather than baking the bug into a
+> green assertion.
 
 **L1 does NOT prove a true output-status RandR flip through `watch_loop`.** Under
 Xvfb — exactly as under `xf86-video-dummy` — outputs never toggle `connected`, so

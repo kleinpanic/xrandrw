@@ -101,3 +101,78 @@ jobs:
           python -c "import xrandrw.cli"   # import-safety smoke
           pytest -q
           python -m build
+
+  functional:
+    # TEST-05 L1 (GATING): real dwm-ipc-patched dwm + a real PRIVATE dwm.sock,
+    # driven headlessly on a PLAIN runner (NO root, NO Xorg, NO dummy driver, NO
+    # tty). Two side-by-side Xinerama heads are provided by a headless Xephyr
+    # nested inside a plain Xvfb (the RandR-1.6 `xrandr --setmonitor` -> Xinerama
+    # bridge is unreliable on hosted Xvfb), so real dwm sees >= 2 monitors and the
+    # full control+capture path + injected record/restore run against reality.
+    # M2 no-vacuous-green: $GITHUB_ACTIONS is set on the runner, so the conftest
+    # policy turns any X/dwm launch failure into an ERROR (never a skip) and
+    # `test_functional_floor` fails the job if 0 functional tests were collected.
+    # The harness builds its own dwm from the vendored, checksum-pinned
+    # dwm-ipc.diff (links libyajl -> libyajl-dev/libyajl2 below, M4).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install X (Xvfb+Xephyr) + xterm + dwm build deps (incl. libyajl-dev)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xvfb xserver-xephyr x11-xserver-utils xterm \
+            build-essential libx11-dev libxft-dev libxinerama-dev \
+            libfontconfig1-dev libyajl-dev libyajl2
+      - name: Cache the built harness dwm (keyed on diff + config.h)
+        uses: actions/cache@v4
+        with:
+          path: .dwm-build-cache
+          key: dwm-ipc-${{ hashFiles('tests/functional/dwm/dwm-ipc.diff', 'tests/functional/dwm/config.h') }}
+      - name: Run L1 functional suite (gating; launch failure ERRORs, never skips)
+        env:
+          DWM_BUILD_CACHE: ${{ github.workspace }}/.dwm-build-cache
+        run: |
+          mkdir -p "$DWM_BUILD_CACHE"
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e ".[test]"
+          pytest -m functional tests/functional -v
+
+  functional-vkms:
+    # TEST-05 L2 (NON-gating): best-effort attempt at a TRUE output-status flip
+    # via real Xorg + xf86-video-dummy (tests/functional/dummy-2head.conf) and/or
+    # VKMS. Under the dummy driver outputs are ALWAYS Connected (xrandr.py:53), so
+    # a real removed/returned set still cannot be produced headlessly; this job
+    # documents the gap and never gates (the true unplug chain is proven only by
+    # the live L3 HDMI verify, plan 14-05). continue-on-error keeps it advisory.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install real Xorg + dummy driver + dwm build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils xterm \
+            build-essential libx11-dev libxft-dev libxinerama-dev \
+            libfontconfig1-dev libyajl-dev libyajl2
+      - name: Best-effort real-Xorg+dummy / VKMS true-output-flip probe (advisory)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e ".[test]"
+          # Real Xorg with the dummy driver commonly needs root/tty and may fail
+          # "no screens found" on hosted runners -- hence this job is advisory.
+          sudo Xorg -config "$PWD/tests/functional/dummy-2head.conf" :99 \
+            >/tmp/xorg-dummy.log 2>&1 &
+          sleep 3
+          sudo modprobe vkms || true   # true connector hotplug is root/VKMS-gated
+          DISPLAY=:99 xrandr --query || true
+          echo "L2 is documentary/non-gating; see tests/functional/README.md"
