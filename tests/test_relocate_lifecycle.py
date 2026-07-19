@@ -27,6 +27,14 @@ from dwmipc_fake_server import FakeDwmServer
 
 A = 0x1400001      # floating window
 B = 0x1400002      # tiled (or second) window
+# Co-resident anchor on the SURVIVING monitor (monitor 0). It is NOT in any
+# xreader map, so capture never resolves/records it -- it exists only in the fake
+# server's client list to keep the source monitor non-empty. This lets the
+# coordinator's crash-safety gate (_source_monitor_has_other_client: refuses a
+# tagmon that would EMPTY a monitor and SIGSEGV single-window-center dwm builds)
+# permit a lone displaced window's restore hop -- mirroring a real evacuation,
+# where the surviving monitor holds the user's other windows.
+ANCHOR = 0x1400009
 PID_A, ST_A = 1001, 5000
 PID_B, ST_B = 1002, 6000
 GA = {"x": 1930, "y": 40, "width": 300, "height": 400}
@@ -202,7 +210,8 @@ def test_tiled_window_no_geometry_and_never_converted(tmp_path, monkeypatch, log
     events = []
     orig_run = _install_common(monkeypatch, events)
     sock = tmp_path / "dwm.sock"
-    clients = [_client(B, 2, 1, GB, False)]  # tiled on DP-2 (monitor 1)
+    clients = [_client(B, 2, 1, GB, False),          # tiled on DP-2 (monitor 1)
+               _client(ANCHOR, 1, 0, GB, False)]      # anchor keeps monitor 0 non-empty
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
         control = MockControl(srv, events)
@@ -335,7 +344,8 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
     events = []
     orig_run = _install_common(monkeypatch, events)
     sock = tmp_path / "dwm.sock"
-    clients = [_client(A, 4, 1, GA, True)]
+    clients = [_client(A, 4, 1, GA, True),
+               _client(ANCHOR, 1, 0, GB, False)]      # anchor keeps monitor 0 non-empty
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
         control = MockControl(srv, events)
@@ -345,7 +355,7 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
             sock_path=str(sock), proc_root=proc_root)
 
         coord.on_settled({}, logger)
-        _evacuate(orig_run, srv, sock, A)   # A now on monitor 0
+        _evacuate(orig_run, srv, sock, A)   # A now on monitor 0 (alongside the anchor)
         outs["DP-2"].connected = False
         coord.on_settled({}, logger)
 
@@ -366,6 +376,48 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
         assert any(getattr(r, "event", None) == "relocate_monitor_giveup" for r in caplog.records)
         # Bounded: exactly n_monitors (2) tagmon attempts, then giveup.
         assert sum(1 for e in events if e[0] == "cmd" and e[1] == "tagmon") == 2
+
+
+# ---------------------------------------------------------------------------
+# CRASH-SAFETY (WM-08): a tagmon that would EMPTY the source monitor is SKIPPED,
+# never issued. On dwm builds with the single-window-center layout patch such a
+# move sets selmon->sel=NULL and the next arrange()->tile() dereferences it ->
+# SIGSEGV (root cause: .planning/debug/resolved/tagmon-sigsegv-dwm.md, fault at
+# tile+384 `cmpl $0x0,0x170(%rdi)`). Guarding OUR code keeps selmon->sel valid on
+# ALL dwm builds. This is the unit mirror of the isolated real-dwm repro.
+# ---------------------------------------------------------------------------
+
+def test_tagmon_skipped_when_move_would_empty_source_monitor(tmp_path, monkeypatch, logger, caplog):
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    # ONLY the displaced window exists on the surviving monitor -> a restore
+    # tagmon would empty it. NO anchor here on purpose: this is the crash case.
+    clients = [_client(A, 4, 1, GA, True)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)   # A now the ONLY client on monitor 0
+        outs["DP-2"].connected = False
+        coord.on_settled({}, logger)
+        events.clear()
+        outs["DP-2"].connected = True
+        with caplog.at_level(logging.WARNING, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # The unsafe move is refused: NO tagmon command was ever issued...
+        assert not any(e[0] == "cmd" and e[1] == "tagmon" for e in events)
+        # ...the guard logged the skip...
+        assert any(getattr(r, "event", None) == "relocate_tagmon_unsafe" for r in caplog.records)
+        # ...and the window stayed on monitor 0 (left where dwm evacuated it).
+        assert srv.state(A)["monitor_number"] == 0
 
 
 # ---------------------------------------------------------------------------
