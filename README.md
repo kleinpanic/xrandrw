@@ -110,6 +110,28 @@ even when the feature is off or no endpoint is present (never a traceback).
 - **Monitor targeting is relative.** Restore uses dwm's relative `tagmon`, so the
   target monitor is derived from the current topology, not an absolute index.
 
+### Adoptability & graceful degradation
+
+xrandrw's **core daemon** — hotplug detection, layout/placement, EDID identity,
+wallpaper reapply, and touch remap — is **generic X11** and runs on **any bare-X11
+window manager** with no window-management dependency. The window-management
+relocate/restore feature is a **strictly additive** layer that **requires** a dwm
+built with the [mihirlad55/dwm-ipc](https://github.com/mihirlad55/dwm-ipc) patch
+exposing `/tmp/dwm.sock`.
+
+On **any WM without that socket** — vanilla dwm, i3, a stock Raspberry Pi 4 dwm —
+the feature is **silently capability-gated off** and the display-layout daemon is
+**completely unaffected**: no dwm-ipc call is ever issued, no window is ever moved,
+and a machine with `WINDOW_MANAGEMENT` unset never even probes the socket. So
+adopting xrandrw on a bare-X11 box costs nothing and breaks nothing.
+
+This contract is not incidental — a dedicated **anti-regression CI suite**
+(`.github/workflows/regression.yml`, REG-01) runs the gate-off / RPi4-style path
+**with no dwm-ipc socket present** and fails the build if any future change ever
+made the gated-off window-mgmt path run (issue a dwm-ipc call or move a window) on
+a no-endpoint machine. The RPi4 / vanilla-dwm path can therefore never silently
+break as the window-mgmt code evolves.
+
 ## Testing & quality gates
 
 The window-management subsystem is exercised by a **display-free** functional test

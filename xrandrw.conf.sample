@@ -55,7 +55,11 @@ PREF_DEFAULT_SIDE=right-of
 # where it was — keyed by PID (Apple-like relocate-on-unplug / restore-on-replug).
 # REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
 # On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
-# feature is SILENTLY capability-gated OFF and your display layout is unaffected.
+# feature is SILENTLY capability-gated OFF: no dwm-ipc call is issued and no window
+# is moved. Your core display layout, touch remap (TOUCH_MAP), and wallpaper are
+# entirely UNAFFECTED. This degradation contract is guarded by a dedicated
+# anti-regression CI suite (REG-01), not incidental — the gated-off / RPi4 path
+# can never silently break as the window-mgmt code evolves.
 # Inspect the feature's live state with:  xrandrw --window-state
 # WINDOW_MANAGEMENT=1
 
