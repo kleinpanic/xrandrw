@@ -41,6 +41,27 @@ jobs:
           pip install "vulture>=2.11"
           vulture
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      # TEST-03 gate + TEST-04 headless evidence. This SINGLE run executes the
+      # entire test suite -- including the fake-AF_UNIX dwm-ipc server, the
+      # mocked-Xlib seam, and the fake-/proc functional tests -- with NO X server,
+      # NO dwm, and NO HDMI attached, then FAILS the build if combined coverage of
+      # the three new window-mgmt modules drops below 90%. The plain multi-version
+      # `test` matrix stays on bare `pytest -q` so the coverage plugin never gates
+      # it; the floor is enforced here on a single Python version.
+      - name: Coverage gate (new window-mgmt modules, --cov-fail-under=90)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e ".[test]"
+          pytest --cov=xrandrw.dwmipc --cov=xrandrw.windows --cov=xrandrw.relocate --cov-report=term-missing --cov-fail-under=90
+
   test:
     runs-on: ubuntu-latest
     strategy:
