@@ -75,17 +75,28 @@ def _seeded_coordinator(env: Dict[str, str], logger: logging.Logger,
     # branch (seed + return, no `removed`), silently missing the first unplug so
     # replug restores nothing. Seeding here populates _prev_connected + _snapshot
     # with the correct pre-unplug placement.
-    coordinator = RelocationCoordinator(ipc_timeout=_RELOCATE_IPC_TIMEOUT)
+    # WM-07: the feature is opt-in. config_enabled ANDs with dwmipc.available()
+    # inside the coordinator's _enabled() gate, so config-off => the whole
+    # lifecycle is a silent no-op with display layout untouched.
+    config_enabled = env.get("WINDOW_MANAGEMENT") == "1"
+    coordinator = RelocationCoordinator(config_enabled=config_enabled,
+                                        ipc_timeout=_RELOCATE_IPC_TIMEOUT)
     # WR-03: if dwm-ipc isn't up yet at boot, on_settled is a silent no-op
     # (_enabled() False) and _prev_connected stays None -- a LATER settle would
     # then seed off an ALREADY-REDUCED topology, silently reintroducing the B2
     # first-unplug miss. Wait a BOUNDED time for the endpoint before seeding.
-    for _ in range(max(1, retries)):
-        if dwmipc.available(dwmipc.DEFAULT_SOCK_PATH, timeout=_RELOCATE_IPC_TIMEOUT):
-            break
-        if stop_evt.is_set():
-            break
-        time.sleep(delay)
+    # WM-07 lean-boot: only run the wait when the feature is enabled. A disabled
+    # coordinator's on_settled is already a no-op, so polling ~retries*delay (~10s)
+    # for an endpoint that will never be used would add a pointless multi-second
+    # boot delay on the common default-off machine with no dwm-ipc (e.g. RPi4
+    # vanilla dwm), violating the project's lean-boot goal.
+    if config_enabled:
+        for _ in range(max(1, retries)):
+            if dwmipc.available(dwmipc.DEFAULT_SOCK_PATH, timeout=_RELOCATE_IPC_TIMEOUT):
+                break
+            if stop_evt.is_set():
+                break
+            time.sleep(delay)
     try:
         coordinator.on_settled(env, logger)
     except Exception as e:
