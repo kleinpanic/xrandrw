@@ -169,10 +169,10 @@ def test_coordinator_record_then_restore_injection(dwm_ipc):
     """
     sock = dwm_ipc
     # An anchor window keeps the SOURCE monitor non-empty so the coordinator's
-    # crash-safety gate (_source_monitor_has_other_client -- refuses a tagmon that
-    # would empty a monitor and SIGSEGV single-window-center dwm builds) permits
-    # the cross-monitor restore. This mirrors a real evacuation, where the
-    # surviving monitor holds the user's other windows.
+    # crash-safety gate (_tagmon_would_crash_dwm -- refuses a tagmon that would
+    # empty the source AND leave a monitor at n==1, SIGSEGVing single-window-center
+    # dwm builds) permits the cross-monitor restore. This mirrors a real
+    # evacuation, where the surviving monitor holds the user's other windows.
     anchor_proc, _anchor_xid = _spawn_xterm(sock)
     proc, xid = _spawn_xterm(sock)
     try:

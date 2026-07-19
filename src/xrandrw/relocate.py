@@ -546,8 +546,8 @@ class RelocationCoordinator:
               "restored displaced window", pid=rec.pid, output=rec.output)
         return "drop"
 
-    def _source_monitor_has_other_client(self, xid, logger) -> bool:
-        """True iff ``xid``'s CURRENT dwm monitor holds at least one OTHER client.
+    def _tagmon_would_crash_dwm(self, xid, direction, logger) -> bool:
+        """True iff moving ``xid`` one hop in ``direction`` hits the EXACT dwm crash.
 
         CRASH-SAFETY GATE (WM-08: never crash dwm). dwm's ``tagmon`` moves the
         selected client to another monitor via ``sendmon`` -> ``focus(NULL)`` ->
@@ -555,30 +555,59 @@ class RelocationCoordinator:
         monitor, ``focus(NULL)`` sets ``selmon->sel = NULL`` (``selmon`` stays the
         now-empty source). On dwm builds carrying the "single-window-center"
         layout patch, the subsequent ``arrange`` -> ``tile`` runs
-        ``if (n == 1 && selmon->sel->CenterThisWindow) ...`` and dereferences the
-        NULL ``selmon->sel`` -> SIGSEGV (root-caused in
-        ``.planning/debug/resolved/tagmon-sigsegv-dwm.md``: fault at ``tile+384``
-        ``cmpl $0x0,0x170(%rdi)``, ``%rdi = selmon->sel = NULL``). Keeping the
-        source monitor non-empty keeps ``selmon->sel`` valid, which is safe on ALL
-        dwm builds (patched or stock).
+        ``if (n == 1 && selmon->sel->CenterThisWindow) ...`` -- so the SIGSEGV
+        needs BOTH (a) the source emptied (NULL ``selmon->sel``) AND (b) SOME
+        monitor at exactly ``n == 1`` during that arrange (the buggy line only
+        dereferences the NULL when a monitor has a single client). Root cause in
+        ``.planning/debug/resolved/tagmon-sigsegv-dwm.md`` (fault at ``tile+384``
+        ``cmpl $0x0,0x170(%rdi)``, ``%rdi = selmon->sel = NULL``); precision
+        refinement in ``.planning/debug/relocate-guard-precision.md`` (Phase 14).
 
-        We read the live per-monitor client lists (``clients.all``) and return
-        True only when ``xid``'s monitor has 2+ clients. On ANY IPC failure -- or
-        if ``xid`` is not found on any monitor -- we return False (FAIL SAFE:
-        refuse the move). A skipped move never crashes dwm; a wrongly-issued one
-        can. The window simply stays where dwm evacuated it (still visible/usable).
+        The prior guard blocked ANY source-emptying move -- sufficient but not
+        necessary, so it wrongly refused the last-window-on-external restore where
+        the destination absorbs it and NO monitor lands at ``n == 1`` (provably
+        safe on the faithful canary). This computes the POST-MOVE per-monitor
+        client counts (source-1, dest+1, others unchanged) where the destination
+        is ``dirtomon(source, direction)`` -- the next/previous monitor by ``num``,
+        wrapping -- and returns True (UNSAFE, block) IFF the source becomes 0 AND
+        any monitor would have exactly 1 client. Otherwise False (safe, allow).
+
+        FAIL SAFE: on ANY IPC failure, malformed reply, an unresolved
+        window/monitor, or fewer than two monitors, we return True (refuse the
+        move) -- a skipped move never crashes dwm; a wrongly-issued one can. The
+        window simply stays where dwm evacuated it (still visible/usable).
         """
         try:
             monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
         except dwmipc.DwmIpcUnavailable:
-            return False
+            return True
         wid = int(xid)
+        counts: dict[int, int] = {}
+        source_num: int | None = None
         for m in monitors:
+            num = m.get("num")
             clients = m.get("clients")
             allc = clients.get("all") if isinstance(clients, dict) else None
-            if isinstance(allc, list) and wid in allc:
-                return len(allc) >= 2
-        return False
+            if not isinstance(num, int) or not isinstance(allc, list):
+                return True  # malformed monitor reply -> fail safe
+            counts[num] = len(allc)
+            if wid in allc:
+                source_num = num
+        n = len(monitors)
+        if source_num is None or n < 2:
+            return True  # window not found on any monitor / no destination -> fail safe
+        # dirtomon(source, direction): next/previous monitor by num, wrapping. dwm
+        # assigns num sequentially (0..n-1) and tagmon walks that ring, so the
+        # relative hop lands on (source_num +/- 1) mod n (mirrors tagmon_direction).
+        dest_num = (source_num + (1 if direction > 0 else -1)) % n
+        if dest_num not in counts:
+            return True  # destination monitor unresolved -> fail safe
+        post = dict(counts)
+        post[source_num] -= 1
+        post[dest_num] += 1
+        source_emptied = post[source_num] == 0
+        any_singleton = any(c == 1 for c in post.values())
+        return source_emptied and any_singleton
 
     def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> None:
         """Bounded focus-then-tagmon loop: at most ``n_monitors`` hops.
@@ -589,22 +618,23 @@ class RelocationCoordinator:
         default). The target monitor is re-derived from the NEW topology
         (``conn_to_mon`` in the caller), not the stale saved monitor_number.
 
-        CRASH-SAFETY GATE: before EVERY hop we verify the tagmon would NOT empty
-        the client's current source monitor (see
-        :meth:`_source_monitor_has_other_client`). A tagmon that removes the last
-        client from a monitor SIGSEGVs dwm builds with the single-window-center
-        patch (NULL ``selmon->sel`` deref in ``tile``). If the move would empty the
-        source we SKIP it, log ``relocate_tagmon_unsafe``, and leave the window on
-        its current monitor -- degrading gracefully rather than crashing dwm. The
-        check is per-hop because each hop's source is the monitor the client
-        currently sits on (which changes as it walks toward the target).
+        CRASH-SAFETY GATE: before EVERY hop we verify this specific tagmon would
+        NOT hit the exact dwm crash -- source emptied AND some monitor left at
+        ``n == 1`` (see :meth:`_tagmon_would_crash_dwm`). Such a move SIGSEGVs dwm
+        builds with the single-window-center patch (NULL ``selmon->sel`` deref in
+        ``tile``). If the move is unsafe we SKIP it, log ``relocate_tagmon_unsafe``,
+        and leave the window on its current monitor -- degrading gracefully rather
+        than crashing dwm. The check is per-hop because each hop's source (and its
+        destination = ``dirtomon(source, direction)``) shifts as the client walks
+        toward the target.
         """
         for _ in range(n_monitors):
-            if not self._source_monitor_has_other_client(rec.xid, logger):
+            if self._tagmon_would_crash_dwm(rec.xid, direction, logger):
                 logev(logger, logging.WARNING, "relocate_tagmon_unsafe",
-                      "skipping tagmon: move would empty the source monitor and can "
-                      "crash dwm builds with the single-window-center patch; leaving "
-                      "window on its current monitor",
+                      "skipping tagmon: move would empty the source monitor while "
+                      "leaving a monitor at a single client and can crash dwm builds "
+                      "with the single-window-center patch; leaving window on its "
+                      "current monitor",
                       pid=rec.pid, xid=rec.xid, target=target)
                 return
             self._focus_and_confirm(rec.xid, logger)

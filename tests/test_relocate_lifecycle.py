@@ -30,10 +30,11 @@ B = 0x1400002      # tiled (or second) window
 # Co-resident anchor on the SURVIVING monitor (monitor 0). It is NOT in any
 # xreader map, so capture never resolves/records it -- it exists only in the fake
 # server's client list to keep the source monitor non-empty. This lets the
-# coordinator's crash-safety gate (_source_monitor_has_other_client: refuses a
-# tagmon that would EMPTY a monitor and SIGSEGV single-window-center dwm builds)
-# permit a lone displaced window's restore hop -- mirroring a real evacuation,
-# where the surviving monitor holds the user's other windows.
+# coordinator's crash-safety gate (_tagmon_would_crash_dwm: refuses a tagmon that
+# would EMPTY the source AND leave a monitor at n==1, SIGSEGVing single-window-
+# center dwm builds) permit a lone displaced window's restore hop -- the source
+# keeps 2 clients so it is never emptied -- mirroring a real evacuation, where the
+# surviving monitor holds the user's other windows.
 ANCHOR = 0x1400009
 PID_A, ST_A = 1001, 5000
 PID_B, ST_B = 1002, 6000
