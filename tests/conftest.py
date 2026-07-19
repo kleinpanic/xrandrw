@@ -42,12 +42,17 @@ def block_live_dwm(request, monkeypatch, tmp_path):
 
 @pytest.fixture
 def output_factory() -> Callable[..., Output]:
-    def make(name, connected=True, primary=False, current_mode=None, modes=None, edid_sha1=None):
+    # `position` (added 14-08) defaults to None so every existing call site is unaffected;
+    # without it no shared-fixture test could express a CRTC-lit output (the state the
+    # replug-bounce defect turns on).
+    def make(name, connected=True, primary=False, current_mode=None, modes=None, edid_sha1=None,
+             position=None):
         return Output(
             name=name,
             connected=connected,
             primary=primary,
             current_mode=current_mode,
+            position=position,
             modes=modes if modes is not None else [],
             edid_sha1=edid_sha1,
         )

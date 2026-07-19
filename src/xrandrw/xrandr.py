@@ -164,8 +164,10 @@ def read_edids(outs: dict[str, Output], logger: logging.Logger) -> None:
     finally:
         d.close()
 
-def topology_hash(logger: logging.Logger | None = None) -> str:
-    outs = RandRReader().read(logger)
+def topology_hash_from_outputs(outs: dict[str, Output]) -> str:
+    # PURE half of topology_hash (extracted Phase 14, 14-08): the digest reasons only over an
+    # output map, so a headless test can drive the watch loop's change detection with the
+    # PRODUCTION predicate instead of a hand-scripted string. No behavior change.
     parts = []
     for name in sorted(outs):
         o = outs[name]
@@ -175,3 +177,6 @@ def topology_hash(logger: logging.Logger | None = None) -> str:
         if o.connected or o.current_mode is not None:
             parts.append(f"{o.name}|{o.connected}|{o.current_mode}")
     return hashlib.sha1("\n".join(parts).encode()).hexdigest()
+
+def topology_hash(logger: logging.Logger | None = None) -> str:
+    return topology_hash_from_outputs(RandRReader().read(logger))

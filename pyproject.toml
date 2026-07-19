@@ -90,6 +90,8 @@ pytest_add_cli_args_test_selection = [
     "tests/test_relocate_control.py",
     "tests/test_relocate_coverage.py",
     "tests/test_relocate_lifecycle.py",
+    "tests/test_relocate_guard_precision.py",
+    "tests/test_relocate_watch.py",
     "tests/test_windows_capture.py",
     "tests/test_windows_identity.py",
     "tests/test_mutation_kills.py",
