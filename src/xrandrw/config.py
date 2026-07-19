@@ -22,6 +22,7 @@ ENV_DEFAULTS = {
     "TOUCH_MAP": "",                       # ""=off | "devname:OUTPUT;..." remap touch after each apply
     "EXCESS_WINDOW_SEC": "20",             # burst window
     "EXCESS_THRESHOLD": "4",               # applies within window -> warn+backoff
+    "WINDOW_MANAGEMENT": "0",              # 0=off (opt-in) / 1=enable dwm-ipc window relocation (WM-07)
 }
 
 def _load_env_file(path: Path) -> Dict[str, str]:
@@ -76,6 +77,7 @@ def load_config() -> Tuple[Dict[str, str], List[str]]:
         return str(v)
 
     env["USE_XWALLPAPER"] = "1" if env["USE_XWALLPAPER"] in ("1", "true", "yes") else "0"
+    env["WINDOW_MANAGEMENT"] = "1" if env["WINDOW_MANAGEMENT"] in ("1", "true", "yes") else "0"
     env["HIDPI_WIDTH"] = coerce("HIDPI_WIDTH", 0)
     env["POLL_INTERVAL"] = coerce("POLL_INTERVAL", 5, use_float=True)
     if env["APPLY_BACKEND"] not in ("subprocess", "native"):
