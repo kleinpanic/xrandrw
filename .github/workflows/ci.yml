@@ -27,6 +27,26 @@ jobs:
           pip install "ruff==0.15.*"
           ruff check .
 
+  lint-strict:
+    # CI-02: additive expanded-ruff gate. Scoped to the three NEW window-mgmt
+    # modules (v0.2.0), which plan 12-02 cleaned to green. The baseline `lint`
+    # job (ruff check .) above is left byte-unchanged. Expanding this ruleset
+    # across all of src/ (~187 hits, mostly UP modernization on shipped v0.1.0
+    # code) is a deliberate documented deferral -- see README "Testing & quality
+    # gates". watch.py/cli.py have annotation-only hits and are NOT in scope here.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Ruff (expanded ruleset, new window-mgmt modules)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install "ruff==0.15.*"
+          ruff check --select B,SIM,PERF,C90,UP,RUF src/xrandrw/dwmipc.py src/xrandrw/windows.py src/xrandrw/relocate.py
+
   deadcode:
     runs-on: ubuntu-latest
     steps:
