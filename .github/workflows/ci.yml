@@ -28,24 +28,45 @@ jobs:
           ruff check .
 
   lint-strict:
-    # CI-02: additive expanded-ruff gate. Scoped to the three NEW window-mgmt
-    # modules (v0.2.0), which plan 12-02 cleaned to green. The baseline `lint`
-    # job (ruff check .) above is left byte-unchanged. Expanding this ruleset
-    # across all of src/ (~187 hits, mostly UP modernization on shipped v0.1.0
-    # code) is a deliberate documented deferral -- see README "Testing & quality
-    # gates". watch.py/cli.py have annotation-only hits and are NOT in scope here.
+    # CI-02/CI-04: additive expanded-ruff gate. WIDENED (CI-04) from the three
+    # window-mgmt modules to ALL of src/xrandrw/. The former deferral (~187 hits,
+    # mostly UP annotation-modernization on shipped v0.1.0 code) is now CLOSED:
+    # plan 14-03 ran a one-pass `ruff --fix UP,RUF,SIM` across src/ and moved the
+    # few knowingly-accepted C901/PERF203 hits to [tool.ruff.lint.per-file-ignores]
+    # in pyproject. The baseline `lint` job (ruff check .) above stays byte-unchanged.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - name: Ruff (expanded ruleset, new window-mgmt modules)
+      - name: Ruff (expanded ruleset, all of src/xrandrw/)
         run: |
           python -m venv .venv
           . .venv/bin/activate
           pip install "ruff==0.15.*"
-          ruff check --select B,SIM,PERF,C90,UP,RUF src/xrandrw/dwmipc.py src/xrandrw/windows.py src/xrandrw/relocate.py
+          ruff check --select B,SIM,PERF,C90,UP,RUF src/xrandrw/
+
+  dupcode:
+    # CI-04: duplicate-code detector (pylint R0801). min-similarity-lines=6 avoids
+    # R0801's default short-block noise (RESEARCH Pitfall 6). The one real finding --
+    # apply.py's two near-identical primary/no-internal placement branches -- was
+    # resolved in plan 14-03 by extracting the shared `_place_externals` helper
+    # (behavior-preserving, golden-log-proven).
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Pylint (duplicate-code R0801)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install "pylint==4.0.*"
+          pylint --disable=all --enable=duplicate-code --min-similarity-lines=6 src/xrandrw
 
   deadcode:
     runs-on: ubuntu-latest
