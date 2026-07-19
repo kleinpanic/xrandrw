@@ -364,3 +364,66 @@ def test_tagmon_giveup_when_target_never_reached(tmp_path, monkeypatch, logger, 
         assert any(getattr(r, "event", None) == "relocate_monitor_giveup" for r in caplog.records)
         # Bounded: exactly n_monitors (2) tagmon attempts, then giveup.
         assert sum(1 for e in events if e[0] == "cmd" and e[1] == "tagmon") == 2
+
+
+# ---------------------------------------------------------------------------
+# CR-01: the coordinator confirms dwm's SELECTED client caught up to the focus
+# (polls get_monitors) BEFORE issuing a verb -- a lagged select must not let a
+# verb land on the previously-selected client.
+# ---------------------------------------------------------------------------
+
+def test_focus_confirmed_before_verb_under_lagged_select(tmp_path, monkeypatch, logger):
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A), (PID_B, "b", ST_B)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    # Record every get_monitors as a "monitors" event so we can prove the
+    # confirm-poll happens BETWEEN focus and the first verb.
+    orig_get_mons = dwmipc.get_monitors
+
+    def mons_spy(*args, **kw):
+        events.append(("monitors",))
+        return orig_get_mons(*args, **kw)
+    monkeypatch.setattr(relocate.dwmipc, "get_monitors", mons_spy)
+
+    sock = tmp_path / "dwm.sock"
+    # A floating on DP-2 (monitor 1); B tiled on DP-1 (monitor 0), never displaced.
+    clients = [_client(A, 4, 1, GA, True), _client(B, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A, B: PID_B}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)          # A now on monitor 0
+        outs["DP-2"].connected = False
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # dwm's selected client is now the WRONG window (B), and selection LAGS by
+        # one poll: a verb issued without confirming would act on B, not A.
+        srv.select(B)
+        srv.set_select_lag(1)
+        events.clear()
+
+        outs["DP-2"].connected = True
+        coord.on_settled({}, logger)
+
+        # Restore landed on A (confirmed target), not the stale selection B.
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert srv.state(A)["tags"] == 4
+        # B was never the verb target: it stayed put and unmodified.
+        assert srv.state(B)["monitor_number"] == 0
+        assert srv.state(B)["tags"] == 1
+        assert srv.state(B)["is_floating"] is False
+
+        # A get_monitors selection-confirm read occurs between the focus and the
+        # first verb -- proving the coordinator polls rather than firing blind.
+        cmd_idx = next(i for i, e in enumerate(events) if e[0] == "cmd")
+        focus_before = [i for i in range(cmd_idx) if events[i][0] == "focus"]
+        assert focus_before, "a focus precedes the first verb"
+        between = events[focus_before[-1] + 1:cmd_idx]
+        assert any(e[0] == "monitors" for e in between), \
+            "coordinator confirms selection (get_monitors) before issuing the verb"

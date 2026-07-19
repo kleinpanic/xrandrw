@@ -38,6 +38,36 @@ from xrandrw.xrandr import RandRReader
 # degrade events log through this shared "xrandrw" logger (mirrors the codebase).
 _LOG = logging.getLogger("xrandrw")
 
+# CR-01 focus-confirm poll budget. _NET_ACTIVE_WINDOW is delivered async over the
+# X channel, but the run_command verbs travel the SEPARATE dwm-ipc socket and act
+# on dwm's currently-selected client -- which only updates once dwm's event loop
+# processes the ClientMessage. So after focus() the coordinator polls get_monitors
+# until dwm reports the target as selected BEFORE issuing a verb (spike 003 used a
+# fixed d.flush()+sleep(0.15); this deterministic poll replaces the magic sleep).
+# A few short tries bounded well under a second; on timeout we log + proceed.
+_FOCUS_CONFIRM_TRIES = 6
+_FOCUS_CONFIRM_SLEEP = 0.03  # seconds between polls (total budget ~= tries*sleep)
+
+
+def _selected_confirmed(monitors, xid) -> bool:
+    """True iff dwm reports ``xid`` as the selected client of the selected monitor.
+
+    dwm's command verbs act on ``selmon->sel``; a monitor reply carries
+    ``is_selected`` (the selected monitor) and ``clients.selected`` (that
+    monitor's selected client). We treat the focus as landed once the selected
+    monitor's selected client is ``xid`` (falling back to any monitor whose
+    ``clients.selected`` is ``xid`` for replies that omit ``is_selected``).
+    """
+    fallback = False
+    for m in monitors:
+        clients = m.get("clients")
+        sel = clients.get("selected") if isinstance(clients, dict) else None
+        if sel == xid:
+            if m.get("is_selected"):
+                return True
+            fallback = True
+    return fallback
+
 # One restore delta. ``verb`` is one of "tagmon" | "tag" | "togglefloating" |
 # "configure"; ``args`` is the verb argument (a tagmon direction int, a tag
 # bitmask int, None for togglefloating, or a geometry dict for configure). The
@@ -333,6 +363,30 @@ class RelocationCoordinator:
               "relocation cycle complete",
               duration_ms=int((time.monotonic() - t0) * 1000), dropped=dropped, skipped=skipped)
 
+    def _focus_and_confirm(self, xid, logger) -> None:
+        """Focus ``xid`` then POLL until dwm reports it selected (CR-01).
+
+        The Xlib ``focus()`` seam only sends ``_NET_ACTIVE_WINDOW`` + flush; dwm's
+        selection updates asynchronously. This bounded poll of ``get_monitors``
+        (threaded with ``ipc_timeout``) closes the focus->verb race so a verb
+        never lands on the previously-selected client. On timeout it logs
+        ``relocate_focus_unconfirmed`` and proceeds best-effort; a transient
+        ``DwmIpcUnavailable`` mid-poll returns early (the caller's next verb will
+        raise and be handled per-window). This lives in the coordinator, not the
+        Xlib seam, because confirming needs an IPC read the seam must not own.
+        """
+        self._control.focus(xid)
+        for _ in range(_FOCUS_CONFIRM_TRIES):
+            try:
+                monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
+            except dwmipc.DwmIpcUnavailable:
+                return
+            if _selected_confirmed(monitors, xid):
+                return
+            time.sleep(_FOCUS_CONFIRM_SLEEP)
+        logev(logger, logging.INFO, "relocate_focus_unconfirmed",
+              "focus selection unconfirmed within budget; proceeding best-effort", xid=xid)
+
     def _restore_one(self, rec, monitors, conn_to_mon, logger) -> str:
         """Restore ONE displaced record; return "drop" (done OR stale identity).
 
@@ -361,13 +415,13 @@ class RelocationCoordinator:
                 if action.verb == "tagmon":
                     self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
                 elif action.verb == "tag":
-                    self._control.focus(rec.xid)
+                    self._focus_and_confirm(rec.xid, logger)
                     dwmipc.run_command("tag", action.args, path=self._path, timeout=self._ipc_timeout)
                 elif action.verb == "togglefloating":
-                    self._control.focus(rec.xid)
+                    self._focus_and_confirm(rec.xid, logger)
                     dwmipc.run_command("togglefloating", path=self._path, timeout=self._ipc_timeout)
                 elif action.verb == "configure":
-                    self._control.focus(rec.xid)
+                    self._focus_and_confirm(rec.xid, logger)
                     self._control.configure_geometry(rec.xid, action.args)
             except Exception as e:
                 # One failed step never aborts the window and never crashes.
@@ -388,7 +442,7 @@ class RelocationCoordinator:
         (``conn_to_mon`` in the caller), not the stale saved monitor_number.
         """
         for _ in range(n_monitors):
-            self._control.focus(rec.xid)
+            self._focus_and_confirm(rec.xid, logger)
             dwmipc.run_command("tagmon", direction, path=self._path, timeout=self._ipc_timeout)
             cur = dwmipc.get_dwm_client(rec.xid, path=self._path,
                                         timeout=self._ipc_timeout)["monitor_number"]

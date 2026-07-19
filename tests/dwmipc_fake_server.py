@@ -98,7 +98,7 @@ class FakeDwmServer:
 
     def __init__(self, path, mode: str = "auto", *, monitors=None, client=None,
                  run_result=None, oversized_size: int = 256 * 1024 * 1024,
-                 trickle_interval: float = 0.05, clients=None):
+                 trickle_interval: float = 0.05, clients=None, select_lag: int = 0):
         if mode not in _VALID_MODES and mode not in _HOSTILE_MODES:
             raise ValueError(f"unknown fake-server mode {mode!r}")
         self.path = str(path)
@@ -115,6 +115,15 @@ class FakeDwmServer:
         self._clients: dict = {}          # int xid -> client dict (mutable)
         self._selected: Optional[int] = None
         self._n_monitors = 1
+        # CR-01: model dwm's async selection settle. When select_lag > 0 a
+        # select() records a PENDING selection that only becomes the effective
+        # _selected after `select_lag` GET_MONITORS polls (or an explicit
+        # settle()) -- mirroring the real gap where _NET_ACTIVE_WINDOW is
+        # delivered over the X channel while the next run_command travels the
+        # SEPARATE ipc socket and acts on the still-current selected client.
+        self._select_lag = int(select_lag)
+        self._pending_select: Optional[int] = None
+        self._pending_lag = 0
         if clients is not None:
             for c in clients:
                 self._clients[int(c["xid"])] = copy.deepcopy(c)
@@ -213,9 +222,32 @@ class FakeDwmServer:
     # --- stateful dwm model (mode == "stateful" only) ----------------------
 
     def select(self, xid) -> None:
-        """Set which client the next run_command verb acts on (X-focus bridge)."""
+        """Set which client the next run_command verb acts on (X-focus bridge).
+
+        When ``select_lag`` is 0 (default) the selection is immediate. When
+        ``select_lag`` > 0 the selection is PENDING and only becomes effective
+        after that many GET_MONITORS polls (or an explicit :meth:`settle`),
+        modelling dwm's async X-channel focus settle (CR-01).
+        """
         with self._lock:
-            self._selected = int(xid)
+            if self._select_lag > 0:
+                self._pending_select = int(xid)
+                self._pending_lag = self._select_lag
+            else:
+                self._selected = int(xid)
+
+    def set_select_lag(self, n: int) -> None:
+        """Enable/disable the lagged-select model at runtime (CR-01 regression)."""
+        with self._lock:
+            self._select_lag = int(n)
+
+    def settle(self) -> None:
+        """Force any pending (lagged) selection to take effect immediately."""
+        with self._lock:
+            if self._pending_select is not None:
+                self._selected = self._pending_select
+                self._pending_select = None
+                self._pending_lag = 0
 
     def set_geometry(self, xid, geometry) -> None:
         """Overwrite a client's current geometry (mirrors ConfigureWindow)."""
@@ -239,16 +271,28 @@ class FakeDwmServer:
             }
 
     def _build_monitors_locked(self) -> list:
+        # CR-01: report per-monitor selection so a client can confirm dwm's
+        # selected client caught up to a focus before issuing a verb. The report
+        # reflects the CURRENT _selected; a pending (lagged) select is promoted
+        # AFTER building this reply, so it takes effect on a LATER poll.
+        sel = self._selected
         mons = []
         for num in range(self._n_monitors):
             xids = [xid for xid, c in self._clients.items()
                     if int(c["monitor_number"]) == num]
+            mon_sel = sel if (sel in xids) else None
             mons.append({
                 "num": num,
                 "monitor_geometry": {"x": num * 1920, "y": 0, "width": 1920, "height": 1080},
                 "layout": {"symbol": "[]="},
-                "clients": {"all": xids},
+                "is_selected": mon_sel is not None,
+                "clients": {"all": xids, "selected": mon_sel},
             })
+        if self._pending_select is not None:
+            self._pending_lag -= 1
+            if self._pending_lag <= 0:
+                self._selected = self._pending_select
+                self._pending_select = None
         return mons
 
     @staticmethod
