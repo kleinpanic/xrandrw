@@ -84,8 +84,26 @@ def scrub_stale(outs: dict[str, Output], logger: logging.Logger, backend: ApplyB
     # Only power off disconnected heads; avoid pre-apply resets that blank active screens
     off = backend.output_off if backend is not None else xrandr_output_off
     for connector, o in outs.items():
-        if not o.connected:
-            off(connector, logger)
+        if o.connected:
+            continue
+        # EFFICIENCY, NOT SAFETY (14-08): a disconnected output that already has no
+        # CRTC is dark, so the --off is pure waste -- measured 3-35 ms each, issued on
+        # every apply, and xrandr's own crtc_apply early-returns on them anyway. This
+        # skip does NOT fire on the live trace, where HDMI-1 was disconnected and LIT.
+        # The scrub's real job is untouched: a disconnected head whose CRTC is STILL
+        # LIT is still powered off, which is what xrandr.py's topology_hash self-heal
+        # rationale depends on.
+        #
+        # SCOPE: the WIDER desired-vs-current diff that would also skip a redundant
+        # auto_pos re-issue is deliberately NOT implemented. Output (xrandr.py:13-24)
+        # carries no rotation, scale or panning fields, so the daemon cannot observe
+        # whether an already-correctly-positioned output still has the scale and panning
+        # auto_pos would set; skipping that call on a position-and-mode match alone would
+        # silently leave a stale scale or panning in place. The wasteful re-modeset is real
+        # and is filed as a follow-up in 14-09, not fixed here on unobservable state.
+        if o.position is None and o.current_mode is None:
+            continue
+        off(connector, logger)
 
 # ---------------- external placement (shared by both primary branches) ----------------
 def _place_externals(st: dict[str, dict], exts: list[Output], primary_name: str,
@@ -163,9 +181,6 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
 
         logev(logger, logging.INFO, "apply_start", "apply: start", source=event_source)
 
-        # Power off any newly disconnected heads only (avoid wiping transforms on active heads)
-        scrub_stale(outs, logger, backend)
-
         # reread + EDID
         # WR-01: a hotplug mid-apply can make this second read fail transiently; degrade
         # like the first read instead of propagating and killing the watch loop.
@@ -175,6 +190,39 @@ def apply_once(env: dict[str, str], logger: logging.Logger, event_source: str = 
         except Exception as e:
             logev(logger, logging.ERROR, "xrandr_unavail", "xrandr read failed mid-apply", error=str(e))
             return
+
+        # Power off any newly disconnected heads only (avoid wiping transforms on active
+        # heads). THIS RUNS ON READ #2, NOT READ #1 (moved 14-08) -- do not move it back.
+        #
+        # The value is STRUCTURAL, not suppressive. Placement filters to
+        # `connected = [o for o in outs.values() if o.connected]` (just below) derived from
+        # read #2, so scrub and placement now compute their decisions from the SAME
+        # snapshot and can no longer contradict each other inside one apply. It becomes
+        # structurally impossible for a single apply_once to power a connector off and then
+        # bring it straight back up -- which is exactly what happened live (--off at
+        # 04:21:43,291 and --auto at 04:21:44,851, ONE apply). An off/on cycle that begins
+        # and ends inside one apply is INVISIBLE to the relocation coordinator, which gets
+        # one observation per apply; forcing the two halves into different applies is what
+        # makes the displacement observable at all.
+        #
+        # This does NOT prevent the logged --off, and no comment or commit may claim it
+        # does. Measured from evidence/newdaemon2.log, the read#1->read#2 gap IS the scrub:
+        # 9 ms at 40,728->40,737 when the scrub had only CRTC-less calls to make, 1.55 s at
+        # 43,291->44,840 when it had a real HDMI modeset. Post-move, read #2 on that trace
+        # lands at ~43,300, when HDMI was still down -- so the --off still happens and dwm
+        # still evacuates. See .planning/debug/relocate-replug-bounce.md for the
+        # measurement. A future reader who believes the suppression story will delete the
+        # CRTC-liveness edge predicate in relocate.py as redundant, and the bug returns.
+        #
+        # Secondary benefit, stated honestly: the window in which read #1 and read #2 can
+        # disagree shrinks from ~1.5 s to ~10 ms.
+        #
+        # Position is BEFORE the `if not connected` early-return, so the all-disconnected
+        # apply_none path still scrubs exactly as it did before the move. A read-#2 failure
+        # now issues no --off at all -- a deliberate improvement: a failed read means the
+        # topology is unknown, and powering heads off on unknown topology is precisely the
+        # defect being fixed.
+        scrub_stale(outs, logger, backend)
 
         connected = [o for o in outs.values() if o.connected]
         if not connected:
