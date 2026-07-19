@@ -402,6 +402,7 @@ def build_record(xid, identity, client, connector, edid) -> WindowRecord:
 
 def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
                     hostname: Optional[str] = None, sock_path: Optional[str] = None,
+                    timeout: float = dwmipc.DEFAULT_TIMEOUT,
                     logger: Optional[logging.Logger] = None) -> List[WindowRecord]:
     """Read-only capture pipeline: enumerate + resolve + capture + associate.
 
@@ -410,6 +411,10 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
     decision D / WM-08 ethos: ``DwmIpcUnavailable`` from ``get_monitors`` degrades
     to ``[]`` (feature unavailable this cycle) and any per-window failure logs +
     skips. Performs NO state mutation and NO window control.
+
+    ``timeout`` (AUDIT-B) is threaded into EVERY dwm-ipc call so a caller (the
+    relocation coordinator) can bound each capture round-trip with its own
+    ``ipc_timeout``; it defaults to ``dwmipc.DEFAULT_TIMEOUT`` for standalone use.
     """
     lg = logger or _LOG
     if reader is None:
@@ -420,7 +425,7 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
 
     # 1. Enumerate monitors; an unavailable socket degrades to an empty capture.
     try:
-        monitors = dwmipc.get_monitors(path=path)
+        monitors = dwmipc.get_monitors(path=path, timeout=timeout)
     except dwmipc.DwmIpcUnavailable as e:
         logev(lg, logging.INFO, "window_capture_unavailable",
               "dwm ipc unavailable; capture skipped this cycle", error=str(e))
@@ -470,7 +475,7 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",
                           "window identity unresolved; skipping", xid=xid)
                     continue
                 try:
-                    client = dwmipc.get_dwm_client(xid, path=path)
+                    client = dwmipc.get_dwm_client(xid, path=path, timeout=timeout)
                 except dwmipc.DwmIpcUnavailable as e:
                     logev(lg, logging.DEBUG, "window_capture_skip",
                           "get_dwm_client failed; skipping window",

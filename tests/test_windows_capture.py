@@ -200,6 +200,35 @@ def test_capture_two_clients_two_monitors(tmp_path, monkeypatch, logger):
     assert all(r.cmdline == "app -x" for r in recs)
 
 
+def test_capture_threads_timeout_into_every_dwmipc_call(tmp_path, monkeypatch, logger):
+    # AUDIT-B: an explicit timeout must reach BOTH get_monitors and
+    # get_dwm_client so every dwm-ipc round-trip honours the caller's bound.
+    _make_proc(tmp_path, 1234)
+    outs = {"DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="e")}
+    mons = [_mon(0, 0, 0, 1920, 1080, clients=[0x11])]
+    seen = {"monitors": [], "client": []}
+
+    def mons_for(path=None, timeout=None, **kw):
+        seen["monitors"].append(timeout)
+        return mons
+
+    def client_for(xid, path=None, timeout=None, **kw):
+        seen["client"].append(timeout)
+        return {"name": "app", "tags": 1, "monitor_number": 0,
+                "geometry": {"current": {"x": 0, "y": 0, "width": 10, "height": 10}},
+                "states": {"is_floating": False, "is_fullscreen": False}}
+
+    monkeypatch.setattr(win_mod.dwmipc, "get_monitors", mons_for)
+    monkeypatch.setattr(win_mod.dwmipc, "get_dwm_client", client_for)
+    monkeypatch.setattr(win_mod, "read_edids", lambda outs, logger=None: None)
+
+    capture_windows(reader=_fake_reader(outs), xreader=_fake_xreader(1234),
+                    proc_root=str(tmp_path), hostname="localhost",
+                    sock_path="/x", timeout=0.25, logger=logger)
+    assert seen["monitors"] == [0.25]
+    assert seen["client"] == [0.25]
+
+
 def test_capture_skips_unresolved_identity(tmp_path, monkeypatch, logger, caplog):
     # xreader yields no pid -> resolve_pid returns None -> window skipped.
     outs = {"DP-1": _out("DP-1", mode=(1920, 1080), position=(0, 0), edid="e")}

@@ -312,9 +312,11 @@ class RelocationCoordinator:
         good baseline (WM-08).
         """
         try:
+            # AUDIT-B: thread ipc_timeout so capture_windows' internal dwmipc
+            # calls honour the same per-call bound as the rest of the coordinator.
             recs = self._capture(reader=self._reader, xreader=self._xreader,
                                  proc_root=self._proc_root, sock_path=self._sock_path,
-                                 logger=logger)
+                                 timeout=self._ipc_timeout, logger=logger)
             return {(r.pid, r.starttime): r for r in recs}
         except Exception as e:
             logev(logger, logging.WARNING, "relocate_capture_fail",
