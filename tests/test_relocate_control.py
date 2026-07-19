@@ -113,7 +113,12 @@ def test_configure_geometry_xlib_error_returns_false_and_logs(monkeypatch, caplo
 
 
 # ---------------------------------------------------------------------------
-# tagmon_direction: fewest-hop wraparound direction with deterministic tie-break
+# tagmon_direction: a bounded FORWARD-ONLY hop direction (UX-03). dwm's dwm-ipc
+# schema types the tagmon argument UNSIGNED, so a negative direction is rejected
+# outright ({"result":"error","reason":"Type mismatch"}, confirmed against real
+# dwm) -- the daemon would issue a guaranteed no-op and believe it had moved the
+# window. dirtomon WRAPS, so "previous" is reachable as n-1 forward hops and the
+# coordinator's bounded loop walks them.
 # ---------------------------------------------------------------------------
 
 def test_tagmon_direction_already_on_target_is_none():
@@ -121,16 +126,23 @@ def test_tagmon_direction_already_on_target_is_none():
 
 
 def test_tagmon_direction_single_hop_two_monitors():
-    assert tagmon_direction(0, 1, 2) in (1, -1)
+    assert tagmon_direction(0, 1, 2) == 1
 
 
-def test_tagmon_direction_backward_wrap_shorter():
-    # 0 -> 3 on 4 monitors: forward 3 hops vs backward 1 hop -> -1.
-    assert tagmon_direction(0, 3, 4) == -1
+def test_tagmon_direction_is_never_negative():
+    # The backward wrap is the FEWER hops here (0 -> 3 on 4 monitors: 3 forward
+    # vs 1 backward) and this used to return -1. It must not: dwm rejects it.
+    assert tagmon_direction(0, 3, 4) == 1
+    # Exhaustive over every reachable (cur, target, n) up to 6 monitors: the
+    # result is only ever +1 or None -- never a value dwm's UINT arg would refuse.
+    for n in range(2, 7):
+        for cur in range(n):
+            for target in range(n):
+                assert tagmon_direction(cur, target, n) in (1, None)
 
 
-def test_tagmon_direction_tie_breaks_positive():
-    # 1 -> 3 on 4 monitors: forward 2 == backward 2 -> deterministic +1.
+def test_tagmon_direction_forward_on_tie():
+    # 1 -> 3 on 4 monitors: forward 2 == backward 2 -> +1 (unchanged).
     assert tagmon_direction(1, 3, 4) == 1
 
 

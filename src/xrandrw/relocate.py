@@ -111,6 +111,32 @@ def _selected_focus(monitors) -> tuple[int | None, int] | None:
     return fallback
 
 
+def _accepted(reply, verb, logger, **fields) -> bool:
+    """True unless dwm REJECTED the command. A rejection is logged, never raised.
+
+    UX-03. ``dwmipc.run_command`` returns dwm's reply dict, and every restore
+    call site used to DISCARD it -- so a dwm-side rejection passed as success and
+    the daemon believed a step had taken effect when nothing had happened.
+    Confirmed live against real dwm:
+    ``{'result':'error','reason':'Command focuswin not found'}`` (verb not
+    registered in that build's config.h) and
+    ``{'result':'error','reason':'Type mismatch'}`` (a negative arg on an
+    UNSIGNED-typed parameter).
+
+    The check lives HERE rather than inside ``dwmipc.run_command`` on purpose:
+    ``run_command``'s "return the decoded reply" contract is depended on by the
+    dwmipc API tests and the functional e2e suite, and raising there would turn
+    every dwm quirk into an exception on the settle path. This is a WARNING and a
+    False -- the WM-08 one-failed-step-never-aborts-the-window contract stands.
+    """
+    if isinstance(reply, dict) and reply.get("result") == "error":
+        logev(logger, logging.WARNING, "relocate_ipc_rejected",
+              "dwm rejected the command; this restore step did not take effect",
+              verb=verb, reason=str(reply.get("reason")), **fields)
+        return False
+    return True
+
+
 def _all_client_xids(monitors) -> set:
     """Every xid dwm currently reports across all monitors (``clients.all`` union)."""
     live: set = set()
@@ -255,16 +281,32 @@ def to_monitor_relative_geometry(geometry, origin) -> dict[str, int]:
     }
 
 def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> int | None:
-    """Return the fewest-hop RELATIVE tagmon direction from ``cur_num`` to ``target_num``.
+    """Return the RELATIVE tagmon direction from ``cur_num`` to ``target_num``, or None.
 
     dwm's ``tagmon`` moves the selected client by a RELATIVE monitor delta
-    (spike 003, WM-05), so the coordinator drives it one hop at a time. This
-    helper returns ``+1`` (next) or ``-1`` (previous) picking whichever wraps in
-    the fewer hops, with a deterministic ``+1`` tie-break. It returns ``None``
-    -- meaning "do not move" -- when there are fewer than two monitors, when
-    ``target_num`` is outside ``range(n_monitors)``, or when already on target.
-    It can NEVER return an unbounded step count; the iteration bound + giveup
-    live in the Plan-03 coordinator.
+    (spike 003, WM-05), so the coordinator drives it one hop at a time. Returns
+    ``+1`` (next monitor) or ``None`` -- meaning "do not move" -- when there are
+    fewer than two monitors, when ``target_num`` is outside
+    ``range(n_monitors)``, or when already on target. It can NEVER return an
+    unbounded step count; the iteration bound + giveup live in the coordinator's
+    :meth:`RelocationCoordinator._tagmon_to_target`.
+
+    NEVER NEGATIVE (UX-03). This used to return ``-1`` whenever the backward wrap
+    was the fewer hops, which is UNREACHABLE on real dwm: the dwm-ipc command
+    schema types the ``tagmon`` argument UNSIGNED, so a ``-1`` comes straight back
+    as ``{"result":"error","reason":"Type mismatch"}`` -- confirmed empirically
+    against the developer's dwm. The daemon would issue a guaranteed no-op and
+    then believe the window had moved. It never bit anyone because on a
+    2-monitor setup forward == backward == 1 and the tie-break already chose +1;
+    it was latent for 3+ monitors.
+
+    The fewest-hops INTENT is preserved, just not by sign: dwm's ``dirtomon``
+    WRAPS, so the previous monitor is reachable as ``n_monitors - 1`` forward
+    hops, and the coordinator's bounded focus-then-tagmon loop already walks
+    hop-by-hop, re-reading ``monitor_number`` and stopping the instant it lands.
+    A backward-wrap restore therefore costs more hops but still terminates well
+    inside the existing ``n_monitors`` bound -- whereas the old ``-1`` cost one
+    rejected command and arrived nowhere.
     """
     if n_monitors < 2:
         return None
@@ -272,9 +314,7 @@ def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> int | No
         return None
     if cur_num == target_num:
         return None
-    forward = (target_num - cur_num) % n_monitors
-    backward = (cur_num - target_num) % n_monitors
-    return 1 if forward <= backward else -1
+    return 1
 
 
 def plan_restore(record, live) -> list[Action]:
@@ -594,6 +634,11 @@ class RelocationCoordinator:
               "relocation cycle complete",
               duration_ms=int((time.monotonic() - t0) * 1000), dropped=dropped, skipped=skipped)
 
+    def _run_verb(self, verb, *args, logger=None, **fields) -> bool:
+        """Issue a dwm command and CHECK the reply (UX-03). Returns acceptance."""
+        reply = dwmipc.run_command(verb, *args, path=self._path, timeout=self._ipc_timeout)
+        return _accepted(reply, verb, logger, **fields)
+
     def _restore_focus(self, prev, logger) -> None:
         """Give the user's pre-restore focus back after a restore cycle (UX-01).
 
@@ -646,7 +691,8 @@ class RelocationCoordinator:
         for _ in range(n):
             if _selected_monitor(monitors) == target_num:
                 return
-            dwmipc.run_command("focusmon", 1, path=self._path, timeout=self._ipc_timeout)
+            if not self._run_verb("focusmon", 1, logger=logger, monitor=target_num):
+                return  # dwm will reject every subsequent hop identically
             monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
         logev(logger, logging.DEBUG, "relocate_focus_restore_skip",
               "could not walk the selected monitor back within the hop bound",
@@ -706,10 +752,10 @@ class RelocationCoordinator:
                     self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
                 elif action.verb == "tag":
                     self._focus_and_confirm(rec.xid, logger)
-                    dwmipc.run_command("tag", action.args, path=self._path, timeout=self._ipc_timeout)
+                    self._run_verb("tag", action.args, logger=logger, pid=rec.pid, xid=rec.xid)
                 elif action.verb == "togglefloating":
                     self._focus_and_confirm(rec.xid, logger)
-                    dwmipc.run_command("togglefloating", path=self._path, timeout=self._ipc_timeout)
+                    self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
                 elif action.verb == "configure":
                     origin = monitor_origin(monitors, target)
                     if origin is None:
@@ -829,7 +875,7 @@ class RelocationCoordinator:
                       pid=rec.pid, xid=rec.xid, target=target)
                 return
             self._focus_and_confirm(rec.xid, logger)
-            dwmipc.run_command("tagmon", direction, path=self._path, timeout=self._ipc_timeout)
+            self._run_verb("tagmon", direction, logger=logger, pid=rec.pid, xid=rec.xid)
             cur = dwmipc.get_dwm_client(rec.xid, path=self._path,
                                         timeout=self._ipc_timeout)["monitor_number"]
             if cur == target:

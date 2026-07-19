@@ -79,15 +79,21 @@ def _rewrite_starttime(tmp_path, pid, comm, starttime):
 # W1 geometry alignment: positions/modes MUST line up with the fake server's
 # per-monitor origins (num*1920, 1920x1080) or match_dwm_monitor_to_output
 # resolves to None and the tests could pass VACUOUSLY.
-_LIVE_GEOMETRY = {"DP-1": ((0, 0), (1920, 1080)), "DP-2": ((1920, 0), (1920, 1080))}
-_EDIDS = {"DP-1": "edA", "DP-2": "edB"}
+_LIVE_GEOMETRY = {"DP-1": ((0, 0), (1920, 1080)),
+                  "DP-2": ((1920, 0), (1920, 1080)),
+                  "DP-3": ((3840, 0), (1920, 1080))}
+_EDIDS = {"DP-1": "edA", "DP-2": "edB", "DP-3": "edC"}
+# Default head set. DP-3 exists in the tables above only for the UX-03 3-monitor
+# test; every other test stays dual-head, so it must be opted into explicitly.
+_DUAL = ("DP-1", "DP-2")
+_TRIPLE = ("DP-1", "DP-2", "DP-3")
 
 
-def _make_outputs():
+def _make_outputs(names=_DUAL):
     return {
-        name: Output(name=name, connected=True, position=pos, current_mode=mode,
-                     edid_sha1=_EDIDS[name])
-        for name, (pos, mode) in _LIVE_GEOMETRY.items()
+        name: Output(name=name, connected=True, position=_LIVE_GEOMETRY[name][0],
+                     current_mode=_LIVE_GEOMETRY[name][1], edid_sha1=_EDIDS[name])
+        for name in names
     }
 
 
@@ -760,3 +766,109 @@ def test_focus_restore_failure_does_not_abort_cycle(tmp_path, monkeypatch, logge
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
         assert _wait_for(lambda: srv.state(B)["monitor_number"] == 1)
         assert not coord._displaced
+
+
+# ---------------------------------------------------------------------------
+# UX-03: dwm command rejections must be SURFACED, not silently treated as
+# success, and no verb may ever be issued with a negative argument (dwm's
+# dwm-ipc schema types tagmon/focusmon UNSIGNED -> "Type mismatch").
+# ---------------------------------------------------------------------------
+
+M2 = 0x140001A         # co-resident anchors, one set per monitor, never captured
+M2B = 0x140001B
+M0 = 0x140002A
+M0B = 0x140002B
+M1 = 0x140003A
+M1B = 0x140003B
+
+
+def test_three_monitor_restore_reaches_target_without_negative_args(
+        tmp_path, monkeypatch, logger):
+    """A backward-wrap restore on 3 monitors: the OLD code emitted tagmon(-1).
+
+    ``tagmon_direction(0, 2, 3)`` used to be -1 (1 backward hop vs 2 forward),
+    which real dwm rejects with "Type mismatch" -- the window would never move
+    and the daemon would believe it had. Forward-only, the bounded loop walks the
+    2 hops and lands on target, which is what this asserts end-to-end.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    g = {"x": 3850, "y": 40, "width": 300, "height": 400}
+    # A on DP-3 (monitor 2). Two anchors per monitor keep every hop clear of the
+    # crash-safety gate (no source emptied, no monitor left at n == 1).
+    clients = [_client(A, 4, 2, g, True),
+               _client(M0, 1, 0, GB, False), _client(M0B, 1, 0, GB, False),
+               _client(M1, 1, 1, GB, False), _client(M1B, 1, 1, GB, False),
+               _client(M2, 1, 2, GB, False), _client(M2B, 1, 2, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs(_TRIPLE)
+        coord = relocate.RelocationCoordinator(
+            control=MockControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        assert coord._snapshot[(PID_A, ST_A)].output == "DP-3"
+        _evacuate(orig_run, srv, sock, A)     # dwm evacuates A: monitor 2 -> 0
+        _unplug(outs, "DP-3")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        events.clear()
+        _replug(outs, "DP-3")
+        coord.on_settled({}, logger)
+
+        # It ARRIVED -- 0 -> 1 -> 2, the long way round, in exactly 2 hops.
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 2)
+        assert srv.state(A)["tags"] == 4
+        assert (PID_A, ST_A) not in coord._displaced
+        tagmons = [e for e in events if e[0] == "cmd" and e[1] == "tagmon"]
+        assert len(tagmons) == 2
+        # NO verb ever carried a negative argument (dwm would reject every one).
+        assert all(arg >= 0 for e in events if e[0] == "cmd" for arg in e[2])
+
+
+def test_dwm_rejection_is_surfaced_not_silently_swallowed(
+        tmp_path, monkeypatch, logger, caplog):
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    _install_common(monkeypatch, events)
+    orig_run = dwmipc.run_command
+    sock = tmp_path / "dwm.sock"
+
+    # dwm refuses `tag` exactly as it refuses an unregistered/mistyped command.
+    def rejecting_run(name, *args, **kw):
+        events.append(("cmd", name, args))
+        if name == "tag":
+            return {"result": "error", "reason": "Type mismatch"}
+        return orig_run(name, *args, **kw)
+
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=MockControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+
+        monkeypatch.setattr(relocate.dwmipc, "run_command", rejecting_run)
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.WARNING, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        rejected = [r for r in caplog.records
+                    if getattr(r, "event", None) == "relocate_ipc_rejected"]
+        assert rejected, "a dwm-side rejection must be logged, not pass as success"
+        assert rejected[0].verb == "tag"
+        assert rejected[0].reason == "Type mismatch"
+        # WM-08 stands: the rejection is NOT fatal. The window still reached its
+        # target monitor via the (accepted) tagmon, and the record still dropped.
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert (PID_A, ST_A) not in coord._displaced

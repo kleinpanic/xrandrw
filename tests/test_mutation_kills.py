@@ -9,7 +9,8 @@ boundary so a named mutant is provably killed:
     guard, so the assertion is load-bearing, not cosmetic.
   - Survivor B: relocate.plan_restore floating/tiled guards (kills the `if record.is_floating`
     configure guard and the `!=`->`==` on the togglefloating state-diff test).
-  - tagmon_direction fewest-hop tie (kills `<=`->`<` in the tie-break).
+  - tagmon_direction is FORWARD-ONLY (kills any mutant reintroducing a negative
+    direction, which dwm's UNSIGNED-typed tagmon arg rejects outright -- UX-03).
 
 These are cheap, deterministic UNIT tests over pure helpers -- no sockets, no real dwm, no X.
 """
@@ -93,11 +94,14 @@ def test_plan_restore_exactly_one_togglefloating_when_state_differs():
     assert toggles == [Action("togglefloating", None)]
 
 
-# --- tagmon_direction fewest-hop tie-break ---------------------------------
+# --- tagmon_direction is forward-only --------------------------------------
 
-def test_tagmon_direction_tie_breaks_positive():
-    # forward hops == backward hops -> the `<=` tie-break returns +1 (kills `<=`->`<`,
-    # which would flip the tie to -1).
+def test_tagmon_direction_is_always_forward():
+    # Kills any mutant that reintroduces a negative direction (e.g. flipping the
+    # returned constant, or restoring the old fewest-hop `1 if forward <= backward
+    # else -1`). dwm's dwm-ipc schema types the tagmon arg UNSIGNED, so a -1 comes
+    # back as {"result":"error","reason":"Type mismatch"} and moves nothing (UX-03).
     assert tagmon_direction(0, 1, 2) == 1
-    # A 4-monitor exact tie (2 hops either way) also resolves to +1.
     assert tagmon_direction(1, 3, 4) == 1
+    # The case the OLD tie-break sent backward: 0 -> 3 on 4 monitors.
+    assert tagmon_direction(0, 3, 4) == 1

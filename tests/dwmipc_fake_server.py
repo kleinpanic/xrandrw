@@ -330,18 +330,30 @@ class FakeDwmServer:
             "states": {"is_floating": False, "is_fullscreen": False},
         }
 
-    def _apply_run_command_locked(self, payload: bytes) -> None:
+    def _apply_run_command_locked(self, payload: bytes):
+        """Apply a run_command to the model and return the REPLY dwm would send.
+
+        UX-03 fidelity: dwm's dwm-ipc command schema types the tagmon/focusmon
+        arguments UNSIGNED, so a NEGATIVE argument is rejected outright --
+        ``{"result":"error","reason":"Type mismatch"}`` -- before any state
+        change. Confirmed empirically against the developer's real dwm this
+        session. Without modelling that, a fake server silently "moves" a window
+        on a command real dwm would refuse, and a test asserting the window
+        arrived would pass against code that cannot work on hardware.
+        """
         try:
             req = json.loads(payload.rstrip(b"\x00").decode())
             command = req.get("command")
-            args = req.get("args") or []
-        except (ValueError, AttributeError):
-            return  # malformed -> dwm no-op
+            args = [int(a) for a in (req.get("args") or [])]
+        except (ValueError, AttributeError, TypeError):
+            return self.run_result  # malformed -> dwm no-op
+        if any(a < 0 for a in args):
+            return {"result": "error", "reason": "Type mismatch"}
         if self._selected is None:
-            return  # nothing selected -> dwm no-op
+            return self.run_result  # nothing selected -> dwm no-op
         c = self._clients.get(self._selected)
         if c is None:
-            return
+            return self.run_result
         if command == "tagmon" and args:
             c["monitor_number"] = (int(c["monitor_number"]) + int(args[0])) % self._n_monitors
         elif command == "tag" and args:
@@ -349,6 +361,7 @@ class FakeDwmServer:
         elif command == "togglefloating":
             c["states"]["is_floating"] = not c["states"]["is_floating"]
         # unknown command -> success reply without mutation (dwm no-op)
+        return self.run_result
 
     def _stateful_reply(self, rtype: int, payload: bytes) -> bytes:
         with self._lock:
@@ -361,8 +374,7 @@ class FakeDwmServer:
                     return _frame(GET_DWM_CLIENT, self._not_found_client(xid))
                 return _frame(GET_DWM_CLIENT, self._client_view_locked(c))
             if rtype == RUN_COMMAND:
-                self._apply_run_command_locked(payload)
-                return _frame(RUN_COMMAND, self.run_result)
+                return _frame(RUN_COMMAND, self._apply_run_command_locked(payload))
             if rtype == SUBSCRIBE:
                 return _frame(SUBSCRIBE, VALID_SUBSCRIBE)
             return _frame(GET_MONITORS, self._build_monitors_locked())
