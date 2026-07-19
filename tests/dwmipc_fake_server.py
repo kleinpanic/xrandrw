@@ -256,6 +256,20 @@ class FakeDwmServer:
             if c is not None:
                 c.setdefault("geometry", {})["current"] = dict(geometry)
 
+    def remove(self, xid) -> None:
+        """Drop a client from the model (mirrors a window being CLOSED).
+
+        Used by the UX-01 focus-restore tests to make the pre-restore focused
+        window vanish mid-cycle. If it was the selected client the selection is
+        cleared too, exactly as dwm's ``unmanage`` -> ``focus(NULL)`` would.
+        """
+        with self._lock:
+            self._clients.pop(int(xid), None)
+            if self._selected == int(xid):
+                self._selected = None
+            if self._pending_select == int(xid):
+                self._pending_select = None
+
     def state(self, xid) -> Optional[dict]:
         """Return a snapshot copy of one client's mutable state for assertions."""
         with self._lock:

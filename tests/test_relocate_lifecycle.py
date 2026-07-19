@@ -601,3 +601,162 @@ def test_dead_displaced_record_evicted_on_steady_settle(tmp_path, monkeypatch, l
         assert (PID_A, ST_A) not in coord._displaced
         assert any(getattr(r, "event", None) == "relocate_displaced_evict"
                    for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# UX-01 (focus theft): dwm's verbs act on the SELECTED client, so the coordinator
+# focuses every window it touches. Before this fix the user's own focus was never
+# captured and never given back -- with 3 windows over 2 bounce cycles that was
+# 6+ focus yanks in a few seconds, ending wherever the last verb landed. The
+# cycle must now capture the pre-restore selection ONCE and restore it ONCE.
+# ---------------------------------------------------------------------------
+
+USER = 0x140000A       # the user's own window, never displaced
+PID_U, ST_U = 1003, 7000
+
+
+def _selection(sock):
+    """dwm's selected client xid, read from the RAW get_monitors reply.
+
+    Deliberately does NOT go through relocate._selected_focus: asserting the
+    production reader against itself could pass vacuously.
+    """
+    for m in dwmipc.get_monitors(path=str(sock)):
+        if m.get("is_selected"):
+            return m["clients"]["selected"]
+    return None
+
+
+def _focus_fixture(tmp_path, monkeypatch, extra_clients=()):
+    """Two displaced windows on DP-2 + the user's window on DP-1, all seeded."""
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A), (PID_B, "b", ST_B),
+                                      (PID_U, "u", ST_U)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    clients = [_client(A, 4, 1, GA, True), _client(B, 8, 1, GB, True),
+               _client(USER, 1, 0, GB, False), *extra_clients]
+    return proc_root, events, orig_run, clients
+
+
+def test_pre_restore_focus_is_restored_after_multi_window_cycle(
+        tmp_path, monkeypatch, logger, caplog):
+    proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
+    sock = tmp_path / "dwm.sock"
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        _evacuate(orig_run, srv, sock, B)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
+
+        # The user is working in THEIR window on the surviving monitor.
+        srv.select(USER)
+        assert _selection(sock) == USER
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # Non-vacuous: BOTH windows really were restored, so focus really was
+        # stolen repeatedly during the cycle...
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert _wait_for(lambda: srv.state(B)["monitor_number"] == 1)
+        assert sum(1 for e in events if e[0] == "focus") > 2
+        # ...and the user's selection is back where they left it.
+        assert _selection(sock) == USER
+        assert any(getattr(r, "event", None) == "relocate_focus_restored"
+                   for r in caplog.records)
+        # ONCE per cycle, not per window: the give-back is the LAST focus event.
+        focus_xids = [e[1] for e in events if e[0] == "focus"]
+        assert focus_xids[-1] == USER
+        assert focus_xids.count(USER) == 1
+
+
+def test_focus_restore_graceful_when_focused_window_is_gone(
+        tmp_path, monkeypatch, logger, caplog):
+    proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
+    sock = tmp_path / "dwm.sock"
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = MockControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        _evacuate(orig_run, srv, sock, B)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+
+        srv.select(USER)
+        # The user CLOSES their focused window while the restore is in flight, so
+        # the captured xid is no longer a live dwm client by give-back time.
+        orig_restore_one = coord._restore_one
+
+        def closing_restore_one(rec, monitors, conn_to_mon, lg):
+            srv.remove(USER)
+            return orig_restore_one(rec, monitors, conn_to_mon, lg)
+        monkeypatch.setattr(coord, "_restore_one", closing_restore_one)
+
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+            coord.on_settled({}, logger)      # must not raise
+
+        # Degrades to a logged skip; the restore cycle itself still completed.
+        assert any(getattr(r, "event", None) == "relocate_focus_restore_skip"
+                   and getattr(r, "reason", None) == "client_gone"
+                   for r in caplog.records)
+        assert any(getattr(r, "event", None) == "relocate_cycle_done"
+                   for r in caplog.records)
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert (PID_A, ST_A) not in coord._displaced
+        assert (PID_B, ST_B) not in coord._displaced
+
+
+def test_focus_restore_failure_does_not_abort_cycle(tmp_path, monkeypatch, logger, caplog):
+    proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
+    sock = tmp_path / "dwm.sock"
+
+    class BoomOnUserFocus(MockControl):
+        """Defence-in-depth: the seam promises never to raise -- assume it does."""
+
+        def focus(self, xid):
+            if xid == USER:
+                raise RuntimeError("focus boom")
+            return super().focus(xid)
+
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=BoomOnUserFocus(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)
+        _evacuate(orig_run, srv, sock, B)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+
+        srv.select(USER)
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+            coord.on_settled({}, logger)      # must not raise
+
+        assert any(getattr(r, "event", None) == "relocate_focus_restore_skip"
+                   for r in caplog.records)
+        # The cycle still finished and BOTH windows were still restored+dropped.
+        assert any(getattr(r, "event", None) == "relocate_cycle_done"
+                   for r in caplog.records)
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert _wait_for(lambda: srv.state(B)["monitor_number"] == 1)
+        assert not coord._displaced

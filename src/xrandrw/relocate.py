@@ -78,6 +78,49 @@ def _selected_confirmed(monitors, xid) -> bool:
             fallback = True
     return fallback
 
+
+def _selected_monitor(monitors) -> int | None:
+    """Return the ``num`` of dwm's SELECTED monitor, or None when unresolvable."""
+    for m in monitors:
+        if m.get("is_selected") and isinstance(m.get("num"), int):
+            return m["num"]
+    return None
+
+
+def _selected_focus(monitors) -> tuple[int | None, int] | None:
+    """Return ``(monitor_num, xid)`` of dwm's selected client, or None if nothing is.
+
+    UX-01 focus preservation. This is the read half of "capture the user's focus
+    before the restore loop"; it reuses the exact reply fields
+    :func:`_selected_confirmed` already trusts (``is_selected`` on the monitor,
+    ``clients.selected`` on it), including the same fallback for replies that omit
+    ``is_selected``. A ``selected`` of 0/None means dwm has NO selected client --
+    there is nothing to steal and nothing to give back, so we return None.
+    """
+    fallback = None
+    for m in monitors:
+        clients = m.get("clients")
+        sel = clients.get("selected") if isinstance(clients, dict) else None
+        if not isinstance(sel, int) or sel == 0:
+            continue
+        num = m.get("num") if isinstance(m.get("num"), int) else None
+        if m.get("is_selected"):
+            return (num, sel)
+        if fallback is None:
+            fallback = (num, sel)
+    return fallback
+
+
+def _all_client_xids(monitors) -> set:
+    """Every xid dwm currently reports across all monitors (``clients.all`` union)."""
+    live: set = set()
+    for m in monitors:
+        clients = m.get("clients")
+        allc = clients.get("all") if isinstance(clients, dict) else None
+        if isinstance(allc, list):
+            live.update(x for x in allc if isinstance(x, int))
+    return live
+
 # One restore delta. ``verb`` is one of "tagmon" | "tag" | "togglefloating" |
 # "configure"; ``args`` is the verb argument (a tagmon direction int, a tag
 # bitmask int, None for togglefloating, or a geometry dict for configure). The
@@ -301,6 +344,13 @@ class RelocationCoordinator:
         self._ipc_timeout = ipc_timeout
         self._displaced: dict[tuple[int, int], object] = {}
         self._snapshot: dict[tuple[int, int], object] = {}
+        # UX-01: count of focus steals. dwm's verbs act on the SELECTED client, so
+        # every restore step yanks focus; the cycle restores the user's focus at
+        # the end IFF it actually stole it (this counter moved). Without the
+        # counter a cycle that touched nothing -- e.g. every record dropped on a
+        # stale identity, which issues no control call at all -- would still
+        # "restore" focus and become a gratuitous focus change of its own.
+        self._focus_calls = 0
         # PRESENT, not CONNECTED (WR-04). Holds the set of outputs with a LIVE
         # CRTC (Output.is_lit) as of the last settle -- NOT the HPD connected set.
         # The old `_prev_connected` name survived the 14-08 switch to CRTC liveness
@@ -481,6 +531,11 @@ class RelocationCoordinator:
         monitor-identity stable -- a different monitor in the same port inherits
         the previous monitor's windows. See :meth:`_record_displaced` for why the
         EDID guard is deferred rather than implemented (WR-06).
+
+        FOCUS PRESERVATION (UX-01): the user's selection is captured ONCE here,
+        before the loop, and given back ONCE after it (:meth:`_restore_focus`) --
+        never per window, which would just be churn the next window's first verb
+        undoes. It is given back only if this cycle actually stole focus.
         """
         t0 = time.monotonic()
         dropped = skipped = 0
@@ -496,6 +551,12 @@ class RelocationCoordinator:
             return
         mapping = match_dwm_monitor_to_output(monitors, outs, logger=logger)
         conn_to_mon = {conn: num for num, conn in mapping.items() if conn is not None}
+        # UX-01: capture the user's pre-restore focus ONCE, from the monitors reply
+        # we already fetched at cycle entry (no extra IPC). Restoring per-window
+        # would be pointless churn -- the next window's first verb would steal it
+        # straight back -- so the give-back happens once, after the whole loop.
+        prev_focus = _selected_focus(monitors)
+        focus_calls_at_entry = self._focus_calls
         for key, rec in list(self._displaced.items()):
             if stop_evt is not None and stop_evt.is_set():
                 logev(logger, logging.INFO, "relocate_cycle_interrupted",
@@ -519,9 +580,77 @@ class RelocationCoordinator:
             if result == "drop":
                 del self._displaced[key]
                 dropped += 1
+        if self._focus_calls > focus_calls_at_entry:
+            # Only give focus back if this cycle actually took it. Same
+            # best-effort contract as every other step: a failure here must never
+            # abort or crash the cycle, so it is logged and swallowed whole.
+            try:
+                self._restore_focus(prev_focus, logger)
+            except Exception as e:  # pylint: disable=broad-except
+                logev(logger, logging.DEBUG, "relocate_focus_restore_skip",
+                      "focus restore failed; leaving dwm's current selection",
+                      reason=str(e))
         logev(logger, logging.INFO, "relocate_cycle_done",
               "relocation cycle complete",
               duration_ms=int((time.monotonic() - t0) * 1000), dropped=dropped, skipped=skipped)
+
+    def _restore_focus(self, prev, logger) -> None:
+        """Give the user's pre-restore focus back after a restore cycle (UX-01).
+
+        dwm's command verbs act on the SELECTED client, so the coordinator focuses
+        every window it touches -- with 3 windows over 2 bounce cycles that is 6+
+        focus yanks in a few seconds, and the user's own window is left selected
+        wherever the last verb happened to land. ``prev`` is the
+        ``(monitor_num, xid)`` captured by :func:`_selected_focus` BEFORE the loop.
+
+        If that client is still live we simply refocus it (the same
+        focus-then-confirm path the verbs use), which also restores the selected
+        MONITOR, since dwm's selmon follows the selected client. If it is gone --
+        closed mid-cycle, or never resolvable -- we fall back to walking the
+        selected monitor back to where it was, so at minimum the user's cursor
+        monitor is not left on the restore target. Everything here is best-effort
+        and DEBUG-logged: it is a UX nicety, never a correctness requirement.
+        """
+        if prev is None:
+            return  # nothing was focused pre-restore -> nothing to give back
+        mon_num, xid = prev
+        try:
+            monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
+        except dwmipc.DwmIpcUnavailable as e:
+            logev(logger, logging.DEBUG, "relocate_focus_restore_skip",
+                  "dwm-ipc unavailable while restoring focus", xid=xid, reason=str(e))
+            return
+        if xid in _all_client_xids(monitors):
+            self._focus_and_confirm(xid, logger)
+            logev(logger, logging.DEBUG, "relocate_focus_restored",
+                  "restored the pre-restore focus", xid=xid, monitor=mon_num)
+            return
+        logev(logger, logging.DEBUG, "relocate_focus_restore_skip",
+              "previously-focused client is no longer a live dwm client; "
+              "restoring the selected monitor only",
+              xid=xid, monitor=mon_num, reason="client_gone")
+        self._focusmon_to(mon_num, monitors, logger)
+
+    def _focusmon_to(self, target_num, monitors, logger) -> None:
+        """Best-effort bounded walk of dwm's SELECTED MONITOR back to ``target_num``.
+
+        Only ever emits ``+1``: dwm's IPC types the ``focusmon`` arg UNSIGNED (a
+        negative is rejected outright with "Type mismatch"), and ``dirtomon``
+        WRAPS, so the previous monitor is reachable as ``n_monitors - 1`` forward
+        hops. Bounded by ``n_monitors`` and silent on give-up -- this is the
+        degraded branch of a UX nicety, so it must never spin or shout.
+        """
+        n = len(monitors)
+        if target_num is None or n < 2:
+            return
+        for _ in range(n):
+            if _selected_monitor(monitors) == target_num:
+                return
+            dwmipc.run_command("focusmon", 1, path=self._path, timeout=self._ipc_timeout)
+            monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
+        logev(logger, logging.DEBUG, "relocate_focus_restore_skip",
+              "could not walk the selected monitor back within the hop bound",
+              monitor=target_num, reason="focusmon_giveup")
 
     def _focus_and_confirm(self, xid, logger) -> None:
         """Focus ``xid`` then POLL until dwm reports it selected (CR-01).
@@ -536,6 +665,7 @@ class RelocationCoordinator:
         Xlib seam, because confirming needs an IPC read the seam must not own.
         """
         self._control.focus(xid)
+        self._focus_calls += 1   # UX-01: we just stole the user's focus
         for _ in range(_FOCUS_CONFIRM_TRIES):
             try:
                 monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
