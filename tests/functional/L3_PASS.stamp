@@ -1,11 +1,12 @@
 L3 LIVE 2-MONITOR HDMI VERIFY — PASS
 =====================================
-date:        2026-07-19 20:33 EDT
-hardware:    Dell laptop, eDP-1 (1920x1200, primary) + HDMI-1 (1600x900, right-of)
-wm:          dwm 6.5 + dwm-ipc patch, live /tmp/dwm.sock
-commit:      2a20f8b
-operator:    kleinpanic (physical unplug/replug of HDMI cable)
-daemon:      xrandrw --watch, WINDOW_MANAGEMENT=1, LOG_LEVEL=debug
+date:                 2026-07-19 20:33 EDT
+verified_at_commit:   2a20f8b
+certifies_version:    0.2.0
+hardware:             Dell laptop, eDP-1 (1920x1200, primary) + HDMI-1 (1600x900, right-of)
+wm:                   dwm 6.5 + dwm-ipc patch, live /tmp/dwm.sock
+operator:             kleinpanic (physical unplug/replug of HDMI cable)
+daemon:               xrandrw --watch, WINDOW_MANAGEMENT=1, LOG_LEVEL=debug
 
 VERIFIED (full true chain, real hardware, no mocks):
   physical unplug -> RandR event -> watch_loop -> apply_once -> on_settled
@@ -18,7 +19,19 @@ RESULT: all 3 windows returned to HDMI-1; exactly ONE displace cycle and ONE
 restore cycle (no bounce-induced double movement); operator focus preserved.
 Operator verdict: "it works perfectly".
 
-EVIDENCE (repo-local, .planning/ is gitignored):
+SCOPE OF THIS EVIDENCE — READ BEFORE RELYING ON IT
+--------------------------------------------------
+ONE machine, ONE topology, ONE operator, ONE session. This is a single manual
+run on the hardware named above. It is not a matrix, not repeated, and not
+independently reproducible by a third party. It says the chain CAN work on that
+configuration; it does not establish that it works on other hardware, on docks,
+on 3+ heads, or on mirrored outputs (which the matcher declines to map at all).
+
+EVIDENCE FILES ARE NOT INDEPENDENTLY VERIFIABLE. The logs cited below live under
+.planning/, which is GITIGNORED and therefore absent from the repository, from
+the sdist, and from every clone. Nobody but the operator can inspect them. This
+stamp is an OPERATOR ATTESTATION, not auditable provenance, and should be read
+with exactly that weight:
   .planning/debug/evidence/livetest-UX-PASS-2026-07-19-2033.log   (this run)
   .planning/debug/evidence/livetest-PASS-2026-07-19-1929.log      (P1 functional pass)
   .planning/debug/evidence/newdaemon2.log                          (the original 04:21 failure)
@@ -27,3 +40,47 @@ HISTORY: two earlier live attempts FAILED (2026-07-19 ~04:21) with windows
 stranded on eDP-1. Root cause was three necessary+jointly-sufficient links:
 matcher connected-preferring tie-break, scrub_stale moved onto read #2, and
 CRTC-liveness edge detection. See .planning/debug/resolved/relocate-replug-bounce.md
+
+DRIFT POLICY (enforced by ci/check_l3_stamp.sh at release time)
+---------------------------------------------------------------
+This stamp goes STALE. The release gate FAILS if src/xrandrw/ changed between
+verified_at_commit and the released tag, and WARNS for any other drift. It also
+fails if certifies_version does not match the tag, so a stamp never silently
+carries forward into a later release. To release code with src/ changes, either
+re-run the live verify and update this file, or record a reviewed waiver in the
+"drift_waived_through" field below, with a written reason.
+(Fields are parsed only at column 0; indented mentions like this one are prose.)
+
+To record a waiver, add a line at column 0:
+    drift_waived_through: <sha>
+followed by a written waiver_reason. The waiver is pinned to that sha and expires
+the moment any later commit touches src/xrandrw/.
+
+CURRENT STATUS: STALE — NO WAIVER RECORDED, RELEASE INTENTIONALLY BLOCKED
+-------------------------------------------------------------------------
+This stamp does NOT cover current HEAD, and no waiver is recorded, so
+ci/check_l3_stamp.sh will FAIL the release. That is deliberate and correct.
+
+Some drift since 2a20f8b is provably irrelevant to this evidence:
+  - 8029c7b refactor(watch): pure code motion. The churn-debounce arithmetic moved
+    verbatim out of _apply_if_changed into _debounce_ms_for_churn; no constant,
+    comparison, or branch changed. _bounce_settled -- the hold-down function this
+    run actually exercised -- is BYTE-IDENTICAL (verified by diffing the body).
+  - f585670, 7c5065c fix(wallpaper): confined to the wallpaper backend.
+  - 1ae719b docs: argparse help-string text in cli.py only; no behaviour.
+
+But the disqualifying drift is in relocate.py, which is squarely ON the certified
+unplug -> displace -> replug -> restore path:
+  - dfbd06c fix(relocate): a REJECTED restore no longer logs success and drops
+    the record.
+  - b132b90 fix(relocate): an UNCONFIRMED focus now aborts the verbs instead of
+    mangling windows.
+These change what the restore path DOES on the exact failure modes this live run
+was meant to exercise. Waiving them as "unrelated" would be false, and would
+reproduce in prose the very rubber-stamp this gate was written to eliminate.
+
+REQUIRED BEFORE v0.2.0 SHIPS: re-run the live 2-monitor unplug/replug verify on
+current HEAD, then update verified_at_commit (and the evidence/result block) to
+match. A fresh run is cheap relative to shipping an unexercised restore path --
+note that two earlier live attempts FAILED, which is why this evidence is gated
+on at all.
