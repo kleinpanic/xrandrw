@@ -19,6 +19,15 @@ classifiers = [
   "Environment :: X11 Applications",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  # Per-version classifiers matching requires-python = ">=3.9". Without these
+  # PyPI's sidebar shows only a bare "3" and gives no signal about the supported
+  # range. 3.9/3.11/3.13 are exercised directly by the CI test matrix; 3.10 and
+  # 3.12 are claimed as in-range between tested versions.
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Desktop Environment :: Window Managers",
 ]
 dependencies = ["python-xlib>=0.31"]
