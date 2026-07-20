@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from xrandrw.policy import SIDES, assign_placements, is_internal_lcd
+from xrandrw.policy import (
+    SIDES,
+    assign_placements,
+    current_or_preferred_mode,
+    is_internal_lcd,
+)
 
 
 def test_internal_lcd_recognizes_all_panel_types():
@@ -13,6 +18,68 @@ def test_internal_lcd_recognizes_all_panel_types():
 def test_external_connectors_are_not_internal():
     for name in ("HDMI-1", "HDMI-A-1", "DP-1", "DisplayPort-0", "VGA-1", "DVI-D-1"):
         assert not is_internal_lcd(name), name
+
+
+# ---------------- GAP-C: current_or_preferred_mode (THE HOTPLUG PATH) ----------------
+#
+# Deleting the '+' (preferred) fallback left the whole suite green. That branch is
+# exactly what runs on hotplug: a freshly connected head has no CRTC yet, so xrandr
+# marks no mode '*' (current) -- only '+' (preferred). Without the fallback the
+# function drops through to o.current_mode, which is None for a new head, and the
+# HiDPI/scale decision downstream (apply.py:288) is then made on missing data.
+
+
+def test_current_mode_flag_wins(output_factory):
+    o = output_factory("HDMI-1", modes=[(1920, 1080, 60.0, "*"), (1280, 720, 60.0, "+")])
+    assert current_or_preferred_mode(o) == (1920, 1080)
+
+
+def test_starred_mode_wins_even_when_a_preferred_mode_is_listed_first(output_factory):
+    # xrandr lists the preferred mode first, so '+' routinely PRECEDES '*'. A
+    # first-match-either-flag implementation would pick the wrong mode here.
+    o = output_factory("HDMI-1", modes=[(3840, 2160, 30.0, "+"), (1920, 1080, 60.0, "*")])
+    assert current_or_preferred_mode(o) == (1920, 1080)
+
+
+def test_scan_continues_past_unflagged_modes_to_reach_the_current_one(output_factory):
+    # Pins the 15->14 loop-back edge: the '*' mode is neither first nor second.
+    o = output_factory("HDMI-1", modes=[
+        (640, 480, 60.0, ""), (1280, 720, 60.0, ""), (1920, 1080, 60.0, "*")])
+    assert current_or_preferred_mode(o) == (1920, 1080)
+
+
+def test_freshly_connected_head_falls_back_to_the_preferred_mode(output_factory):
+    # THE hotplug case: no CRTC => current_mode None and no '*' anywhere.
+    o = output_factory("HDMI-1", current_mode=None,
+                       modes=[(1920, 1080, 60.0, "+"), (1280, 720, 60.0, "")])
+    assert current_or_preferred_mode(o) == (1920, 1080), \
+        "a just-plugged head has only '+'; without this fallback its size is unknown"
+
+
+def test_preferred_fallback_scans_past_unflagged_modes(output_factory):
+    # The 18->17 loop-back edge, and the realistic ordering where the preferred
+    # mode is not the first line of the mode list.
+    o = output_factory("HDMI-1", current_mode=None,
+                       modes=[(640, 480, 60.0, ""), (2560, 1440, 60.0, "+")])
+    assert current_or_preferred_mode(o) == (2560, 1440)
+
+
+def test_combined_star_plus_flags_are_recognised(output_factory):
+    # xrandr's most common rendering: "1920x1080  60.00*+" -- current AND preferred.
+    o = output_factory("HDMI-1", modes=[(1920, 1080, 60.0, "*+")])
+    assert current_or_preferred_mode(o) == (1920, 1080)
+
+
+def test_unflagged_mode_list_falls_back_to_current_mode(output_factory):
+    o = output_factory("HDMI-1", current_mode=(1024, 768),
+                       modes=[(640, 480, 60.0, ""), (800, 600, 60.0, "")])
+    assert current_or_preferred_mode(o) == (1024, 768)
+
+
+def test_no_modes_and_no_current_mode_is_none(output_factory):
+    # Both callers guard on None (apply.py:28 `if m:`, :288 `cur[0] if cur else 0`),
+    # so returning None is the contract, not an oversight.
+    assert current_or_preferred_mode(output_factory("HDMI-1", modes=[])) is None
 
 
 def _pref(items, side="right-of"):

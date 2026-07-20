@@ -319,3 +319,34 @@ def test_watchdog_thread_pings_once_then_stops(monkeypatch, logger):
 
     apply_mod._watchdog_thread(OneShotEvent(), logger)
     assert pings == ["WATCHDOG=1"], "exactly one watchdog ping before the stop event"
+
+
+# ---------------- GAP-C chain consequence: HiDPI scale on a fresh head ----------------
+
+def test_hidpi_scale_reads_the_preferred_mode_of_a_freshly_plugged_panel(
+        monkeypatch, tmp_path, logger, output_factory):
+    # apply.py:288 sizes the panel via policy.current_or_preferred_mode. A head that
+    # was just connected has no CRTC, so xrandr flags NO mode '*' -- only '+'. Drop
+    # the preferred fallback and `cur` is None, `width` collapses to 0, and this 4K
+    # panel is silently scaled 1x1 instead of 0.5x0.5. The layout is wrong on exactly
+    # the code path hotplug takes, with nothing logged as an error.
+    scales = []
+    monkeypatch.setattr(apply_mod, "wait_for_x", lambda logger: None)
+    monkeypatch.setattr(apply_mod, "read_edids", lambda outs, logger: None)
+    monkeypatch.setattr(apply_mod, "scrub_stale", lambda outs, logger, backend=None: None)
+    monkeypatch.setattr(apply_mod, "reapply_wallpaper", lambda env, logger: None)
+    monkeypatch.setattr(apply_mod, "xrandr_rotate_left_if_portrait", lambda c, o, logger: None)
+    monkeypatch.setattr(apply_mod, "xrandr_auto_pos", lambda *a, **k: None)
+    monkeypatch.setattr(apply_mod, "run", lambda *a, **k: None)
+    monkeypatch.setattr(apply_mod, "xrandr_auto_primary_scale",
+                        lambda c, s, logger: scales.append((c, s)))
+
+    panel = output_factory(name="eDP-1", connected=True, current_mode=None,
+                           modes=[(3840, 2160, 60.0, "+"), (1920, 1080, 60.0, "")])
+    monkeypatch.setattr(apply_mod, "read_xrandr", lambda logger: {"eDP-1": panel})
+
+    env = _env(tmp_path)          # HIDPI_WIDTH = 3840
+    apply_mod.apply_once(env, logger, event_source="test")
+
+    assert scales == [("eDP-1", "0.5x0.5")], \
+        "a 4K panel known only by its preferred mode must still trip the HiDPI threshold"
