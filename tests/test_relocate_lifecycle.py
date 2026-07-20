@@ -1022,3 +1022,91 @@ def test_all_verbs_rejected_keeps_record_and_logs_no_restore(
         coord.on_settled({}, logger)
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
         assert (PID_A, ST_A) not in coord._displaced
+
+
+class StockDwmControl:
+    """A control whose ``focus()`` sends the ClientMessage but does NOT focus.
+
+    This is STOCK dwm. Its ``clientmessage`` handles ``_NET_ACTIVE_WINDOW`` with
+    ``seturgent(c, 1)`` -- it flags urgency and never touches the selection. Every
+    other control in this suite bridges ``focus -> srv.select`` because the
+    functional harness dwm carries a ``focusonnetactive`` patch
+    (``tests/functional/dwm/dwm-ipc.diff``) added SPECIFICALLY so relocate's
+    focus-then-act works. That patch is why B-4 went unnoticed: the whole test
+    corpus modelled a patched dwm, so nothing could reproduce a PyPI user's
+    stock install.
+    """
+
+    def __init__(self, srv, events):
+        self.srv = srv
+        self.events = events
+
+    def focus(self, xid):
+        self.events.append(("focus", xid))
+        return True          # the send succeeded; dwm just ignored it
+
+    def configure_geometry(self, xid, geom):
+        self.srv.set_geometry(xid, geom)
+        self.events.append(("configure", xid))
+        return True
+
+
+def test_unconfirmed_focus_sends_no_mutating_verb(tmp_path, monkeypatch, logger, caplog):
+    """B-4: on a dwm that does not focus on _NET_ACTIVE_WINDOW, issue NOTHING.
+
+    Pre-fix, `_focus_and_confirm` logged `relocate_focus_unconfirmed` and
+    PROCEEDED BEST-EFFORT, so tag/tagmon/togglefloating were fired at whatever dwm
+    actually had selected -- on a stock install, the USER'S OWN WINDOW, silently
+    retagged and dragged to another monitor on every single replug.
+
+    Here ANCHOR is the user's focused window and A is the displaced one. The
+    control models stock dwm (the ClientMessage lands, the selection does not
+    move), so dwm keeps reporting ANCHOR as selected. The restore must issue NO
+    mutating verb at all, must not touch ANCHOR, and must keep A displaced.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=StockDwmControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)        # dwm evacuates A: monitor 1 -> 0
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # THE USER refocuses their own window -- and stock dwm will keep it
+        # selected no matter how many _NET_ACTIVE_WINDOW messages we send.
+        srv.select(ANCHOR)
+        anchor_before = srv.state(ANCHOR)
+        events.clear()
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # 1. NOT ONE mutating verb was sent.
+        mutating = [e for e in events
+                    if e[0] == "cmd" and e[1] in ("tag", "tagmon", "togglefloating")]
+        assert mutating == [], f"unconfirmed focus must issue no verb, sent: {mutating}"
+
+        # 2. The user's window is exactly as they left it -- same monitor, same
+        #    tags, same floating state. This is the damage the bug did.
+        assert srv.state(ANCHOR) == anchor_before
+
+        # 3. The displaced window was left alone, and the record survives (B-3),
+        #    so the restore retries if the user later switches to a dwm that
+        #    honours _NET_ACTIVE_WINDOW.
+        assert srv.state(A)["monitor_number"] == 0
+        assert (PID_A, ST_A) in coord._displaced
+
+        # 4. And it said so, loudly.
+        logged = [getattr(r, "event", None) for r in caplog.records]
+        assert "relocate_focus_unconfirmed" in logged
+        assert "relocate_restore" not in logged
