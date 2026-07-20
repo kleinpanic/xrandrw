@@ -131,6 +131,23 @@ def _bounce_settled(env: dict[str, str], logger: logging.Logger,
             return True
     return False
 
+def _debounce_ms_for_churn(churn: dict, logger: logging.Logger) -> int:
+    # Pure bookkeeping over the churn window/backoff, split out of _apply_if_changed
+    # ONLY to keep that function's guard chain under the complexity limit -- none of
+    # this is part of the 14-08 decision logic and none of the arithmetic changed.
+    # The caller does the sleeping: tests monkeypatch time.sleep at the `watch` module
+    # level, and a helper that slept would move what they observe.
+    now = time.monotonic()
+    churn["times"].append(now)
+    churn["times"] = [t for t in churn["times"] if now - t <= churn["window"]]
+    if len(churn["times"]) > churn["threshold"]:
+        logev(logger, logging.WARNING, "watch_excess", "excess topology churn",
+              count=len(churn["times"]), window=churn["window"])
+        churn["backoff"] = min(1000, churn["backoff"] + 150)
+    else:
+        churn["backoff"] = max(0, churn["backoff"] - 50)
+    return 150 + churn["backoff"]
+
 def _install_signals(logger: logging.Logger):
     def _sig(sig, frame):
         logev(logger, logging.INFO, "shutdown", "signal received", sig=sig)
@@ -146,19 +163,11 @@ def _apply_if_changed(env: dict[str, str], logger: logging.Logger,
     cur = topology_hash(logger)
     if cur == last_hash:
         return last_hash
-    now = time.monotonic()
-    churn["times"].append(now)
-    churn["times"] = [t for t in churn["times"] if now - t <= churn["window"]]
-    if len(churn["times"]) > churn["threshold"]:
-        logev(logger, logging.WARNING, "watch_excess", "excess topology churn",
-              count=len(churn["times"]), window=churn["window"])
-        churn["backoff"] = min(1000, churn["backoff"] + 150)
-    else:
-        churn["backoff"] = max(0, churn["backoff"] - 50)
+    debounce_ms = _debounce_ms_for_churn(churn, logger)
     logev(logger, logging.DEBUG, "watch_change", "topology hash changed",
-          debounce_ms=150 + churn["backoff"])
+          debounce_ms=debounce_ms)
     # Debounce a burst: one physical plug emits Crtc+Output+ScreenChange (Pitfall 6).
-    time.sleep((150 + churn["backoff"]) / 1000.0)
+    time.sleep(debounce_ms / 1000.0)
     verify = topology_hash(logger)
     if verify == last_hash:
         return last_hash
