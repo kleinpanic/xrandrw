@@ -16,6 +16,46 @@ output. Everything else is the standard library. Optional extras:
 `xrandrw[journald]` for `systemd-python` journald logging, `xrandrw[wallpaper]`
 for the pure-Python Pillow wallpaper backend.
 
+## Scope
+
+**X11 only — there is no Wayland support and none is planned.** xrandrw drives
+RandR directly; under a Wayland compositor it has nothing to talk to.
+
+It is built for **bare window managers** (dwm, i3, bspwm, awesome, and similar)
+that have no display-configuration daemon of their own. **It will fight a full
+desktop environment.** GNOME (mutter) and KDE (KScreen) run their own output
+managers that reassert their saved layout, so the two will overwrite each other
+in a loop. Do not run xrandrw alongside them without first disabling their
+display management.
+
+## Requirements
+
+Beyond Python ≥ 3.9 and a running X server:
+
+| Binary | Needed | Debian/Ubuntu | Arch |
+|--------|--------|---------------|------|
+| `xrandr` | **Required** — applying any layout. | `x11-xserver-utils` | `xorg-xrandr` |
+| `xset` | **Required** — polling for X readiness at startup. | `x11-xserver-utils` | `xorg-xset` |
+| `xinput` | Only if you set `TOUCH_MAP`. | `xinput` | `xorg-xinput` |
+| `feh` | Optional wallpaper backend. | `feh` | `feh` |
+| `xwallpaper` | Optional wallpaper backend. | `xwallpaper` | `xwallpaper` |
+
+```bash
+# Debian/Ubuntu — required only
+sudo apt install x11-xserver-utils
+# Arch — required only
+sudo pacman -S xorg-xrandr xorg-xset
+```
+
+A missing **optional** binary is a **silent no-op**, not an error: with no
+wallpaper backend installed, layout changes still apply and the wallpaper simply
+is not reset. Likewise a `TOUCH_MAP` set without `xinput` present remaps
+nothing. Run with `LOG_LEVEL=debug` if a feature seems inert.
+
+(`fehbg` is a third-party helper script rather than a distro package. It is
+auto-detected when on `PATH`, and it ignores `WALL` — see the `WALL` row in
+[Configuration](#configuration).)
+
 ## Install
 
 End-user (isolated, lands the `xrandrw` console-script at `~/.local/bin` — never
@@ -343,6 +383,30 @@ Note that `graphical-session.target` is only reached if something in your
 session reaches it; bare WM setups launched from `.xinitrc` often do not. If it
 is absent, either have your session run `systemctl --user start
 graphical-session.target`, or use `default.target` instead.
+
+## Uninstall
+
+```bash
+systemctl --user disable --now xrandrw     # stop it and unlink from the target
+rm -f ~/.config/systemd/user/xrandrw.service
+systemctl --user daemon-reload
+pipx uninstall xrandrw
+```
+
+That leaves no processes behind, but does not remove your data. To also drop the
+persistent state — the EDID-to-profile identity map and attach-order stack:
+
+```bash
+rm -rf ~/.local/share/xrandrw          # state.json (honours XDG_DATA_HOME)
+rm -f  ~/.config/xrandrw.conf          # your config, if you made one
+```
+
+Deleting `state.json` alone is also the way to **reset placement** without
+uninstalling: the daemon rebuilds it from scratch on the next apply, forgetting
+every remembered monitor and side preference. The lock files live in
+`$XDG_RUNTIME_DIR` and are cleared on reboot, so they never need cleaning up.
+
+From a repo checkout, `make uninstall` does the first block for you.
 
 ## License
 
