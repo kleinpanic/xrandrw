@@ -145,6 +145,34 @@ def test_missing_binary_still_skips_without_failing(monkeypatch, logger, caplog,
     assert "wallpaper_exhausted" not in _events(caplog)
 
 
+# ---------------- fehbg ignores WALL (WP-02) ----------------
+
+def test_fehbg_reports_that_wall_is_ignored(monkeypatch, logger, caplog, wall_file):
+    _present(monkeypatch, "fehbg")
+    fake = _FakeRun({"fehbg": 0})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file}, logger)
+
+    ignored = _only(caplog, "wallpaper_wall_ignored")
+    assert ignored, "fehbg must state plainly that WALL is not applied"
+    assert ignored[0].levelno == logging.INFO
+    assert "WALLPAPER_ENGINE=feh" in ignored[0].msg, "must name the WALL-honouring alternative"
+    # And we must NOT invent a flag for a third-party script.
+    assert fake.cmds == [["fehbg"]]
+
+
+def test_fehbg_silent_when_no_wall_configured(monkeypatch, logger, caplog):
+    _present(monkeypatch, "fehbg")
+    monkeypatch.setattr(wp, "run", _FakeRun({"fehbg": 0}))
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": ""}, logger)
+
+    assert "wallpaper_wall_ignored" not in _events(caplog)
+
+
 def test_select():
     # Configured engine wins even when no binary is present; case-insensitive + stripped.
     for name in ("feh", "fehbg", "xwallpaper", "native"):

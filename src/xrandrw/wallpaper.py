@@ -93,6 +93,12 @@ def _try_backend(backend: str, env: dict[str, str], logger: logging.Logger):
         if not shutil.which("fehbg"):
             logev(logger, logging.INFO, "wallpaper_skip", "fehbg missing", file=wall)
             return None
+        if wall and Path(wall).is_file():
+            # WP-02: fehbg is a third-party script that picks its own image; it takes no
+            # image argument, so WALL is a silent no-op here. Say so instead of pretending.
+            logev(logger, logging.INFO, "wallpaper_wall_ignored",
+                  "fehbg backend selects its own image; WALL not applied "
+                  "(set WALLPAPER_ENGINE=feh to honour WALL)", file=wall)
         return _run_backend(["fehbg"], "fehbg", logger)
     if backend == "feh":
         if not (shutil.which("feh") and Path(wall).is_file()):

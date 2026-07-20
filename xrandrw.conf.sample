@@ -4,7 +4,11 @@
 # 0 = use feh/fehbg; 1 = use xwallpaper
 USE_XWALLPAPER=1
 
-# Wallpaper path (used by feh/xwallpaper)
+# Wallpaper path. Honoured by the feh, xwallpaper and native backends ONLY.
+# The fehbg backend is a third-party script that chooses its own image and takes
+# no path argument, so WALL does NOTHING when it is selected (auto-detect prefers
+# fehbg when it is on PATH). xrandrw logs `wallpaper_wall_ignored` when that
+# happens; set WALLPAPER_ENGINE=feh below if you want WALL to be applied.
 WALL="$HOME/Pictures/wallpaper.jpg"
 
 # Treat eDP as HiDPI if preferred-mode width >= this

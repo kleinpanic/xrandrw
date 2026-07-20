@@ -60,7 +60,7 @@ variable of the same name.
 | Key | Purpose |
 |-----|---------|
 | `USE_XWALLPAPER` | `0` = feh/fehbg, `1` = xwallpaper. |
-| `WALL` | Wallpaper image path. |
+| `WALL` | Wallpaper image path. **Not honoured by the `fehbg` backend** — `fehbg` is a third-party script that picks its own image and takes no path argument, so `WALL` is a no-op there (logged as `wallpaper_wall_ignored`). Set `WALLPAPER_ENGINE=feh` (or `xwallpaper`/`native`) to have `WALL` applied. |
 | `HIDPI_WIDTH` | Treat internal panel as HiDPI when preferred-mode width ≥ this. |
 | `POLL_INTERVAL` | Watch-loop poll interval in seconds. |
 | `LOG_LEVEL` | `none`, `err`, `info`, `notice`, `debug`. |
