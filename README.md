@@ -10,7 +10,11 @@ display by its EDID identity, and auto-places externals relative to a primary
 using a persistent attach-order policy — so your monitors end up where you left
 them, every time.
 
-Pure Python standard library (optional `systemd-python` for journald logging).
+One runtime dependency: [`python-xlib`](https://pypi.org/project/python-xlib/)
+(≥ 0.31), used to talk to X11 and RandR directly rather than scraping subprocess
+output. Everything else is the standard library. Optional extras:
+`xrandrw[journald]` for `systemd-python` journald logging, `xrandrw[wallpaper]`
+for the pure-Python Pillow wallpaper backend.
 
 ## Install
 
