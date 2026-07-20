@@ -83,6 +83,50 @@ variable of the same name.
 See [`xrandrw.conf.sample`](xrandrw.conf.sample) for an annotated template —
 copy it to `~/.config/xrandrw.conf` and edit.
 
+### Device profiles (`LAYOUT_*`)
+
+When the generic attach-order policy is not what you want, `LAYOUT_<NAME>` pins
+an exact layout for an exact set of connectors and overrides the policy
+entirely.
+
+```ini
+# Laptop panel alone.
+LAYOUT_SOLO="eDP-1:auto:primary:0x0"
+
+# Laptop panel + desk monitor: 2560x1440 external above the internal panel.
+LAYOUT_DESK="eDP-1:auto:primary:0x0;HDMI-1:2560x1440:secondary:above=eDP-1"
+```
+
+With only the laptop open, `LAYOUT_SOLO` fires. Plug in the desk monitor and
+`LAYOUT_DESK` fires instead.
+
+**Matching is exact set equality, not subset.** A profile fires only when the
+connected connector set *equals* its own. `LAYOUT_SOLO` above does **not** fire
+when `HDMI-1` is also connected — which is why the two-head case needs its own
+profile. (Subset matching was removed as a defect: a one-connector profile would
+win on a two-head topology and leave the second head unconfigured and black.)
+If two profiles name the identical connector set, the alphabetically-first
+`LAYOUT_` name wins, so ties are deterministic rather than config-order
+dependent.
+
+Grammar — `;`-separated outputs, `:`-separated fields:
+
+```
+connector:mode:role:position[:transform...]
+```
+
+| Field | Values |
+|-------|--------|
+| `connector` | Connector name, e.g. `eDP-1`, `HDMI-1`, `DSI-1`. |
+| `mode` | An xrandr mode such as `1920x1080`, or `auto` for `--auto`. |
+| `role` | `primary` or `secondary`. |
+| `position` | Absolute `XxY` (e.g. `1600x0`), or relative `side=CONNECTOR` (e.g. `right-of=eDP-1`) where side is `left-of`/`right-of`/`above`/`below`. |
+| `transform` | Optional and repeatable: `scale=WxH`, `rotate=left\|right\|inverted\|normal`. |
+
+A malformed `LAYOUT_` line is skipped with a log line rather than crashing the
+daemon — so a typo silently disables that one profile. Check the journal if a
+profile is not firing.
+
 ### Replug bounce hold-down
 
 A physical replug rarely presents one clean connect edge — the connector
