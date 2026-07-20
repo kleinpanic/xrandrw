@@ -33,10 +33,15 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   plus a `reason` key on degraded paths. It always exits 0. Note that `displaced`
   is always empty from the CLI: displaced records live in the running daemon's
   coordinator, which a separate one-shot process cannot read.
-- CI: a `--cov-fail-under=90` coverage gate on the new modules, an expanded
-  `ruff` ruleset (`B`/`SIM`/`PERF`/`C90`/`UP`/`RUF`) job scoped to them, and a
-  headless functional suite (a fake `AF_UNIX` dwm-ipc server + mocked Xlib +
-  fake `/proc`) that exercises the full lifecycle with no X server or hardware.
+- CI: a scoped line-coverage gate of 95 on the new modules plus a whole-package
+  `--cov-branch --cov-fail-under=85` ratchet; the expanded `ruff` ruleset
+  (`B`/`SIM`/`PERF`/`C90`/`UP`/`RUF`) across all of `src/xrandrw/`; `pylint`
+  duplicate-code and `vulture` dead-code jobs; a `cli-smoke` job that invokes the
+  really-installed console-script; a display-free suite (fake `AF_UNIX` dwm-ipc
+  server + mocked Xlib + fake `/proc`) needing no X server or hardware; a
+  real-dwm functional tier built from a vendored dwm-ipc patch under
+  Xephyr-in-Xvfb; a no-dwm-ipc anti-regression workflow; and a nightly mutation
+  ratchet.
 - `SECURITY.md` documenting the local-desktop threat posture and accepted risks.
 
 ### Fixed
@@ -67,8 +72,8 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
 ### Notes
 - Fullscreen state is captured but not reapplied on restore; cross-monitor moves
   need ≥2 heads; `tagmon` is relative. Documented in the README.
-- Expanding the new ruff rulesets across the v0.1.0 modules is a tracked
-  follow-up (the gate is scoped to the new window-management modules for now).
+- The expanded ruff ruleset now covers **all** of `src/xrandrw/`, not just the new
+  window-management modules; the earlier scoping deferral is closed.
 - The unplug/replug fixes above were confirmed by a physical unplug/replug on a
   single machine (a Dell laptop, `eDP-1` + `HDMI-1`, dwm 6.5 with dwm-ipc), in
   addition to the headless suite. Other hardware and multi-head configurations

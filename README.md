@@ -290,28 +290,48 @@ break as the window-mgmt code evolves.
 
 ## Testing & quality gates
 
-The window-management subsystem is exercised by a **display-free** functional test
-suite: the full capture→restore lifecycle is driven against a **real `AF_UNIX`
-fake dwm-ipc server** that speaks the DWM-IPC wire protocol, a **mocked Xlib** seam,
-and a **fake `/proc`**. Because none of it needs a live display, the entire suite
-runs **headless** in CI with **no X server, no dwm, and no second monitor attached**.
+The suite runs in **two tiers**, split by the `functional` pytest marker.
 
-CI enforces four gates:
+**Display-free tier — `pytest -m 'not functional'`.** The default, and the bulk
+of the suite. The window-management capture→restore lifecycle is driven against a
+**real `AF_UNIX` fake dwm-ipc server** speaking the DWM-IPC wire protocol, a
+**mocked Xlib** seam, and a **fake `/proc`**. None of it needs a display, so it
+runs headless with no X server, no dwm, and no second monitor.
 
-- **`test`** — the full `pytest` suite across Python 3.9 / 3.11 / 3.13.
-- **`coverage`** — a coverage gate (`--cov-fail-under=90`) scoped to the three new
-  window-mgmt modules (`xrandrw.dwmipc`, `xrandrw.windows`, `xrandrw.relocate`). This
-  single run is also the headless evidence above.
-- **`lint`** / **`lint-strict`** — the baseline `ruff check .`, plus an expanded
-  ruleset (`B,SIM,PERF,C90,UP,RUF`) on the three new modules.
-- **`deadcode`** — `vulture` dead-code analysis over `src/`.
+**Real-dwm tier — `pytest -m functional`.** The opposite: it needs a display and a
+window manager. CI's `functional` job installs `xvfb` and `xserver-xephyr`, builds
+a **real dwm** from a vendored checksum-pinned `dwm-ipc.diff`, and runs the suite
+against it over a private socket (Xephyr nested in Xvfb to get two Xinerama heads).
+This tier is **new and barely exercised** — it first went green on 2026-07-19 and
+has only a handful of passing runs, so it has not yet protected anything
+historically. Treat it as a gate going forward, not as retrospective evidence.
 
-**Deferred (acknowledged follow-up):** expanding the `B,SIM,PERF,C90,UP,RUF` ruleset
-across **all** of `src/` is intentionally **deferred**, not done in this milestone. It
-is ~187 hits, overwhelmingly `UP` annotation-modernization on shipped v0.1.0 code
-(plus the annotation-only hits in `watch.py` / `cli.py`). It is deferred to avoid
-churning stable code during the v0.2.0 window-management work, and is tracked as a
-backlog item so the scope choice is explicit rather than silent.
+Neither tier can prove the real thing. No CI runner can flip a connector's
+hotplug-detect bit, so the true unplug→relocate→replug→restore chain is verified
+only by a physical hardware run, recorded in `tests/functional/L3_PASS.stamp` and
+gated on at release time.
+
+CI (`ci.yml`) runs **nine** jobs — eight gating, one advisory:
+
+- **`test`** — `pytest -q` plus `python -m build` across Python 3.9 / 3.11 / 3.13.
+- **`coverage`** — **two** separate runs: a line-coverage gate of **95** scoped to
+  `xrandrw.dwmipc` / `xrandrw.windows` / `xrandrw.relocate`, and a whole-package
+  `--cov-branch --cov-fail-under=85` ratchet.
+- **`lint`** — baseline `ruff check .`.
+- **`lint-strict`** — the expanded `B,SIM,PERF,C90,UP,RUF` ruleset across **all** of
+  `src/xrandrw/`.
+- **`dupcode`** — `pylint` duplicate-code (R0801) at `--min-similarity-lines=6`.
+- **`deadcode`** — `vulture` over `src/`.
+- **`cli-smoke`** — `pip install .` (a real, non-editable install) then invokes the
+  installed `xrandrw` console-script, catching entry-point regressions.
+- **`functional`** — the real-dwm tier described above.
+- **`functional-vkms`** *(advisory, `continue-on-error`)* — a best-effort real
+  Xorg + dummy-driver / VKMS probe. It documents that a true output-status flip is
+  still not reachable headlessly; it never gates.
+
+Two further workflows sit outside `ci.yml`: **`regression.yml`** (the no-dwm-ipc
+degradation gate, on every push/PR) and **`mutation.yml`** (a nightly mutation-testing
+ratchet, also dispatchable on demand).
 
 ## systemd user service
 
