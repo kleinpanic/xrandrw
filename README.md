@@ -234,6 +234,9 @@ WantedBy=dwm-session.target
 EOF
 ```
 
+**Read [Choosing the right `WantedBy` target](#choosing-the-right-wantedby-target)
+before enabling it** — the default target only exists on the author's machine.
+
 Adjust `WALL=` to a wallpaper you actually have (or delete the line). `pipx`
 places the console-script at `~/.local/bin/xrandrw`, which is exactly the
 `ExecStart` path above.
@@ -246,6 +249,51 @@ make enable     # systemctl --user daemon-reload && enable --now
 ```
 
 Run `systemctl --user daemon-reload` after any reinstall.
+
+### Choosing the right `WantedBy` target
+
+**If your session is not driven by a `dwm-session.target`, you must retarget the
+unit — otherwise it will stop starting after your next reboot, with no error.**
+
+This is a silent failure, which is why it gets its own section. The shipped unit
+uses `dwm-session.target` in `After=`, `PartOf=`, and `WantedBy=`. That target is
+a personal session unit which this repo does **not** install. `systemctl --user
+enable` still succeeds against a non-existent target, and `--now` still starts
+the service, so everything looks correct — until the next boot, when nothing
+ever pulls the unit in.
+
+If you do not have a `dwm-session.target`, replace all three references before
+enabling:
+
+```ini
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Install]
+WantedBy=graphical-session.target
+```
+
+Or, against an already-installed unit:
+
+```bash
+sed -i 's/dwm-session\.target/graphical-session.target/g' \
+  ~/.config/systemd/user/xrandrw.service
+systemctl --user daemon-reload
+systemctl --user reenable xrandrw.service
+```
+
+(`reenable` is required — the old symlink still points at the old target.)
+
+List the targets your session actually provides with:
+
+```bash
+systemctl --user list-units --type=target
+```
+
+Note that `graphical-session.target` is only reached if something in your
+session reaches it; bare WM setups launched from `.xinitrc` often do not. If it
+is absent, either have your session run `systemctl --user start
+graphical-session.target`, or use `default.target` instead.
 
 ## License
 
