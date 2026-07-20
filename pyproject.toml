@@ -7,7 +7,11 @@ name = "xrandrw"
 version = "0.2.0"
 description = "Robust, zero-config X11 display hotplug policy daemon for dwm/i3"
 readme = "README.md"
-requires-python = ">=3.7"
+# 3.9 is the real floor, not an aspiration: logging_utils.py uses shlex.join
+# (3.8+), CI tests 3.9/3.11/3.13, and [tool.ruff] target-version is py39.
+# Declaring >=3.7 let a 3.7 install succeed and then crash on the first
+# LOG_LEVEL=debug command. Untested support is worse than no support.
+requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "Klein Panic" }]
 keywords = ["xrandr", "x11", "display", "hotplug", "systemd", "dwm"]
