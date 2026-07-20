@@ -80,7 +80,8 @@ variable of the same name.
 | `BOUNCE_SUSPECT_MS` | A disconnect arriving this soon after an apply is treated as a possible replug bounce rather than a genuine unplug (default `5000`). |
 | `BOUNCE_HOLDDOWN_MS` | How long to keep re-reading the topology before believing a suspect disconnect (default `3000`). `0` disables the hold-down entirely. |
 
-See [`xrandrw.conf.sample`](xrandrw.conf.sample) for an annotated template —
+See [`xrandrw.conf.sample`](https://github.com/kleinpanic/xrandrw/blob/main/xrandrw.conf.sample)
+for an annotated template —
 copy it to `~/.config/xrandrw.conf` and edit.
 
 ### Device profiles (`LAYOUT_*`)
@@ -345,4 +346,4 @@ graphical-session.target`, or use `default.target` instead.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](https://github.com/kleinpanic/xrandrw/blob/main/LICENSE).
