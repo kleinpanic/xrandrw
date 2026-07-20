@@ -189,7 +189,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xvfb xserver-xephyr x11-xserver-utils xterm \
+            xvfb xserver-xephyr x11-xserver-utils x11-utils xterm \
             build-essential libx11-dev libxft-dev libxinerama-dev \
             libfontconfig1-dev libyajl-dev libyajl2
       - name: Cache the built harness dwm (keyed on diff + config.h)
@@ -225,7 +225,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils xterm \
+            xserver-xorg-core xserver-xorg-video-dummy x11-xserver-utils x11-utils xterm \
             build-essential libx11-dev libxft-dev libxinerama-dev \
             libfontconfig1-dev libyajl-dev libyajl2
       - name: Best-effort real-Xorg+dummy / VKMS true-output-flip probe (advisory)
