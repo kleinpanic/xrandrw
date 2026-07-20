@@ -23,9 +23,68 @@ SURVIVOR_BASELINE=627
 #
 # Per-module survivor split (audit aid): dwmipc=173  relocate=265  windows=189
 #
+# ==========================================================================================
+# RE-MEASUREMENT 2026-07-19 (14-08 replug-bounce fix + UX-01/02/03, commits 76f39ae..2a20f8b)
+# ==========================================================================================
+# MEASURED, from a clean NON-editable venv via ci/mutation_sanity_kill.sh's environment,
+# AFTER the sanity-kill was GREEN (killed=35 on parse_header -> B1 false-0-kill trap defeated).
+# Numbers read from mutants/mutmut-cicd-stats.json, NOT hand-computed:
+#
+#            total   run   killed  survived  no_tests   kill rate
+#   14-04:    1937   1736    1109       627       201      63.9%
+#   14-09:    2266   2067    1311       756       199      63.4%
+#   delta:    +329   +331    +202      +129        -2      -0.5pp
+#
+#   Per-module survivors: dwmipc=184 (+11)  relocate=370 (+105)  windows=202 (+13)
+#
+# THE CEILING IS DEPRECATED AS MEASURED -- AND IS DELIBERATELY *NOT* RAISED HERE.
+#
+# The ratchet did NOT move down, because the scoped modules GREW during the same phase:
+# `git diff 6a087a0..HEAD -- src/xrandrw/{dwmipc,windows,relocate}.py` = +484/-65 lines
+# (relocate.py +416 alone: bounce hold-down, steady-state focus snapshot/restore, IPC-rejection
+# surfacing). More code spawns more mutants; +331 runnable mutants appeared and +129 of them
+# survive.
+#
+# THIS IS NOT A TEST-STRENGTH REGRESSION, and the evidence is the RATE, not the count:
+#   * overall kill rate is FLAT within noise: 63.9% -> 63.4%
+#   * the NEW code's own kill rate is 202/331 = 61.0%, i.e. comparable to the incumbent 63.9%
+#   * tests grew +2429 lines over the same range
+# A genuine regression would show previously-killed mutants surviving at a FLAT mutant total.
+# That is not what happened.
+#
+# WHY 627 IS LEFT IN PLACE ANYWAY (this is the important part -- do not "fix" it casually):
+# Raising a quality gate's ceiling is a POLICY change, not a measurement. Plan 14-09 states the
+# invariant flatly ("it only ever moves DOWN") and its threat register (T-14-09-01) names a
+# silently-raised ceiling as the thing to prevent. So the ceiling stays at 627, the nightly gate
+# reports RED (756 > 627), and the RED IS CORRECT AND INFORMATIVE: it is the ratchet doing its
+# job, telling a human that a count-based gate has been outgrown by its own codebase.
+#
+# THE DECISION THIS NEEDS FROM A HUMAN (one of):
+#   (a) RE-BASELINE to the measured 756 and record this block as the justification -- restores a
+#       working gate, but concedes the count ratchet must be re-based whenever code grows; or
+#   (b) SWITCH THE GATE to a kill-RATE floor (e.g. fail under 60%), which is scale-invariant and
+#       is the technically correct instrument for a growing codebase. Requires editing
+#       .github/workflows/mutation.yml:69, which plan 14-09 placed out of scope; or
+#   (c) KILL ~129 new survivors with new tests, then set the ceiling to whatever that measures.
+#       Plan 14-09 adds no tests, so this was not available here.
+# Until then the surviving-mutant BODY below is the 14-04 (627) set, deliberately left in sync
+# with the 627 ceiling so this file stays internally consistent. Regenerate BOTH together.
+# ==========================================================================================
+#
 # Full surviving-mutant set (sorted) follows so a diff shows exactly which mutant regressed
 # if the count ever rises. Regenerate with: bash ci/mutation_sanity_kill.sh's env + `mutmut run`
 # then `mutmut results | grep ': survived$'`.
+#
+# ^^ USE THE ANCHORED PATTERN ABOVE -- the `$` end-of-line ANCHOR is load-bearing, not decoration.
+#    ONLY the anchored form is authoritative:
+#        anchored    `grep -c ': survived$'`  == SURVIVOR_BASELINE   <- correct, verify with this
+#        unanchored  `grep -c ': survived'`   >  SURVIVOR_BASELINE   <- ALWAYS an over-count
+#    Every real survivor line ENDS in ": survived", so the anchor loses nothing. But the header
+#    comments that QUOTE the pattern (including these lines) end in prose, so they match the
+#    unanchored form and not the anchored one. The unanchored over-count therefore GROWS as this
+#    header is edited -- do not "fix" it by chasing a hardcoded number.
+#    Historical note: this was found as a 628-vs-627 off-by-one against a single quoting comment.
+#    The quoted examples were always correct; only the unanchored grep was wrong.
 # ------------------------------------------
 xrandrw.dwmipc.x_available__mutmut_12: survived
 xrandrw.dwmipc.x_available__mutmut_14: survived
