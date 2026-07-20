@@ -1,7 +1,10 @@
 name: Release
 
-# Publishing a GitHub Release (on a v* tag) builds the artifacts, attaches them to
-# the release, and publishes to PyPI via the PYPI_API_TOKEN repo secret. Token auth
+# Publishing ANY GitHub Release builds the artifacts, attaches them to the release,
+# and publishes to PyPI via the PYPI_API_TOKEN repo secret. The trigger is
+# `release: types: [published]` -- it is NOT restricted to v* tags, and the version
+# is derived from the release's tag name with a leading `v` stripped if present
+# (`${GITHUB_REF_NAME#v}`), so both `v0.2.0` and a bare `0.2.0` are accepted. Token auth
 # (not Trusted Publishing) keeps it self-contained. `--skip-existing` makes re-runs
 # idempotent so a re-published release never fails on an already-uploaded version.
 on:

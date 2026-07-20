@@ -8,8 +8,11 @@
 # absolute paths in full: /home/youruser/wall.jpg
 # Surrounding single or double quotes are stripped; nothing else is interpreted.
 
-# 0 = use feh/fehbg; 1 = use xwallpaper
-USE_XWALLPAPER=1
+# 0 = use feh/fehbg; 1 = use xwallpaper.
+# The built-in default is 0 (feh/fehbg). The line below is left COMMENTED so that
+# copying this file verbatim does not silently switch your wallpaper backend --
+# uncomment it only if you actually want xwallpaper.
+# USE_XWALLPAPER=1
 
 # Wallpaper path. Honoured by the feh, xwallpaper and native backends ONLY.
 # The fehbg backend is a third-party script that chooses its own image and takes
@@ -38,6 +41,26 @@ LOG_LEVEL=notice
 
 # Default side for new/unknown monitors: right-of|left-of|above|below
 PREF_DEFAULT_SIDE=right-of
+
+# Layout apply backend: subprocess (default, the tested path) | native.
+# 'native' is currently a seam-stub that warns and delegates back to subprocess,
+# so there is no reason to set it yet. Unknown values fall back to subprocess.
+# APPLY_BACKEND=subprocess
+
+# Apply-lock path. The default shown in the code is /tmp/xrandrw.lock, but that
+# literal value is a sentinel: when it is left untouched the lock is relocated to
+# $XDG_RUNTIME_DIR/xrandrw.lock (falling back to /run/user/$UID, then
+# ~/.local/share/xrandrw). This deliberately keeps the lock OUT of world-writable
+# /tmp so another local user cannot squat it. Set this only if you have a reason.
+# LOCKFILE=
+
+# Churn backoff: if more than EXCESS_THRESHOLD applies happen within
+# EXCESS_WINDOW_SEC seconds, the daemon warns and backs off. Both are coerced to
+# an integer and clamped to a floor -- EXCESS_WINDOW_SEC to 5, EXCESS_THRESHOLD
+# to 2 -- so a smaller or malformed value degrades to the floor/default, never a
+# crash.
+# EXCESS_WINDOW_SEC=20
+# EXCESS_THRESHOLD=4
 
 # Touch remap: keep a touchscreen's coordinates aligned to its panel after every
 # layout change. `xinput map-to-output` bakes in the output's position at call time,
@@ -79,7 +102,9 @@ PREF_DEFAULT_SIDE=right-of
 #               where side is left-of|right-of|above|below
 #   transform (optional, repeatable) -- scale=WxH or rotate=left|right|inverted|normal
 #
-# A malformed LAYOUT_ line is skipped with a log line, never a crash.
+# A malformed LAYOUT_ line is skipped rather than crashing -- but the skip is
+# SILENT: there is no log line at any level, so a typo disables that one profile
+# with no diagnostic anywhere. Re-read the grammar above if a profile never fires.
 #
 # Pi4 users: uncomment to reproduce the pre-Phase-5 hardcoded DSI-1/HDMI-1 layout.
 # LAYOUT_PI4="DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
@@ -95,7 +120,11 @@ PREF_DEFAULT_SIDE=right-of
 # onto a surviving display and, on REPLUG, moves the SAME process's window back
 # where it was -- keyed by (pid, starttime) from /proc, not PID alone, so a recycled
 # PID is never mistaken for the original (Apple-like relocate/restore on unplug/replug).
-# REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
+# LIMIT: that key is (pid, starttime) ONLY -- the window id is not part of it -- so
+# at most ONE window per process is remembered and restored. A process owning several
+# top-level windows gets one of them back; the rest stay where dwm left them.
+# REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing the control socket
+# (${DWM_SOCKET:-/tmp/dwm.sock} -- /tmp/dwm.sock is only the DEFAULT path).
 # On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
 # feature is SILENTLY capability-gated OFF: no dwm-ipc call is issued and no window
 # is moved. Your core display layout, touch remap (TOUCH_MAP), and wallpaper are
@@ -104,6 +133,18 @@ PREF_DEFAULT_SIDE=right-of
 # can never silently break as the window-mgmt code evolves.
 # Inspect the feature's live state with:  xrandrw --window-state
 # WINDOW_MANAGEMENT=1
+
+# dwm-ipc tuning knobs -- ENVIRONMENT ONLY. These three are read straight from the
+# environment by the dwm-ipc client at import time and are NOT part of this config
+# file's key set: setting them HERE has NO EFFECT. Export them in your session or
+# add an Environment= line to the systemd unit instead. A malformed value degrades
+# to the default with one dwmipc_env_invalid warning and never raises.
+#   DWM_SOCKET        default /tmp/dwm.sock   -- dwm-ipc control socket path
+#   DWMIPC_TIMEOUT    default 1.0   min 0.001 -- per-op socket timeout, seconds
+#                                                (inf/nan rejected)
+#   DWMIPC_MAX_REPLY  default 8388608 (8 MiB) min 1 -- hard cap on a reply's
+#                                                advertised size, enforced before
+#                                                any allocation
 
 
 # Replug bounce hold-down (UX-02). A physical replug rarely presents one clean

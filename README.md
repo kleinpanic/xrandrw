@@ -88,7 +88,7 @@ pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 |---------|-------------|
 | `xrandrw --apply` | Apply the layout once (default when no flag is given). |
 | `xrandrw --watch` | Event-driven watch: re-apply on RandR hotplug notifications. |
-| `xrandrw --daemon` | The same event-driven watch, plus the systemd `sd_notify` readiness handshake (the intended service entry point). |
+| `xrandrw --daemon` | The same event-driven watch, plus the systemd `sd_notify` calls and a `daemon_start` log line (the intended service entry point). |
 | `xrandrw --print` | Print `xrandr --query` output and exit. |
 | `xrandrw --set-pref OUTPUT_OR_ID SIDE` | Set a display's preferred side: `right-of`, `left-of`, `above`, `below`. |
 | `xrandrw --list-state` | Dump the placement state JSON. |
@@ -97,8 +97,12 @@ pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 **`--watch` and `--daemon` run the identical loop.** Both register for RandR
 `ScreenChange`/`OutputChange`/`CrtcChange` notifications and block in `select()`
 on the X connection — neither one busy-polls. The only differences are that
-`--daemon` emits `sd_notify("READY=1")` for systemd `Type=notify` readiness and
-logs a `daemon_start` line. Use `--daemon` under systemd and `--watch` when
+`--daemon` emits `sd_notify("READY=1")` (plus watchdog keep-alives) and logs a
+`daemon_start` line. Note that both the documented and the shipped unit are
+`Type=simple`, so systemd does **not** use `READY=1` as a readiness gate — the
+notification is sent but ignored, and the service is considered started as soon as
+the process is forked. Switch the unit to `Type=notify` if you want the handshake
+to actually gate readiness. Use `--daemon` under systemd and `--watch` when
 running it by hand; the display behaviour is the same. (`POLL_INTERVAL` is the
 `select()` timeout in both — a slow safety net, not the detection mechanism.)
 
@@ -142,6 +146,18 @@ See [`xrandrw.conf.sample`](https://github.com/kleinpanic/xrandrw/blob/main/xran
 for an annotated template —
 copy it to `~/.config/xrandrw.conf` and edit.
 
+**Three dwm-ipc knobs are environment-only.** They are read directly by the
+dwm-ipc client at import time and are **not** part of the config-file key set, so
+setting them in `~/.config/xrandrw.conf` does nothing — use the environment (or an
+`Environment=` line in the systemd unit). A malformed value degrades to the default
+with one `dwmipc_env_invalid` warning and never raises.
+
+| Env var | Default | Minimum | Purpose |
+|---------|---------|---------|---------|
+| `DWM_SOCKET` | `/tmp/dwm.sock` | — | Path to the dwm-ipc control socket. |
+| `DWMIPC_TIMEOUT` | `1.0` | `0.001` | Per-operation socket timeout in seconds. Non-finite values (`inf`, `nan`) are rejected. |
+| `DWMIPC_MAX_REPLY` | `8388608` (8 MiB) | `1` | Hard cap on a reply's advertised `size`, enforced before any allocation. |
+
 ### Device profiles (`LAYOUT_*`)
 
 When the generic attach-order policy is not what you want, `LAYOUT_<NAME>` pins
@@ -182,9 +198,11 @@ connector:mode:role:position[:transform...]
 | `position` | Absolute `XxY` (e.g. `1600x0`), or relative `side=CONNECTOR` (e.g. `right-of=eDP-1`) where side is `left-of`/`right-of`/`above`/`below`. |
 | `transform` | Optional and repeatable: `scale=WxH`, `rotate=left\|right\|inverted\|normal`. |
 
-A malformed `LAYOUT_` line is skipped with a log line rather than crashing the
-daemon — so a typo silently disables that one profile. Check the journal if a
-profile is not firing.
+A malformed `LAYOUT_` line is skipped rather than crashing the daemon — but the
+skip is **entirely silent**: `parse_profile` returns `None` and the profile is
+simply omitted, with **no log line at any level**. So a typo disables that one
+profile with no diagnostic anywhere. If a profile is not firing, re-read its
+grammar here; the journal will not tell you.
 
 ### Replug bounce hold-down
 
@@ -235,11 +253,12 @@ An opt-in feature (default off) that gives display hotplug an Apple-like feel: o
 unplug, xrandrw relocates the removed display's windows onto a surviving display,
 and on replug it moves the **same process's** window back where it was — keyed by
 `(pid, starttime)` read from `/proc`, not by PID alone, so a recycled PID cannot
-be mistaken for the original process.
+be mistaken for the original process. That key is also the limit of the feature's
+granularity: **at most one window per process** is remembered (see Limitations).
 
 **Requirement.** This needs a dwm built with the
 [mihirlad55/dwm-ipc](https://github.com/mihirlad55/dwm-ipc) patch, which exposes a
-control socket at `/tmp/dwm.sock`. On any window manager without that IPC endpoint
+control socket at `${DWM_SOCKET:-/tmp/dwm.sock}`. On any window manager without that IPC endpoint
 (vanilla dwm, i3, RPi4 stock dwm) the feature is **silently capability-gated off**
 and your display layout is entirely unaffected — nothing to configure, nothing to
 break.
@@ -285,6 +304,14 @@ daemon's `relocate_*` log events (`LOG_LEVEL=debug`) rather than this command.
 
 **Limitations.**
 
+- **Only one window per process is remembered.** The capture snapshot is keyed by
+  `(pid, starttime)` alone — the window id is recorded on each record but is *not*
+  part of the key — so when one process owns several top-level windows, all but one
+  record are overwritten and only that surviving window is relocated and restored.
+  Single-window-per-process applications, which is the usual case for terminals and
+  editors, are unaffected. A multi-window app (a browser with several windows, or
+  an editor with several frames from one process) will see only one of its windows
+  come back; the others stay where dwm's own evacuation left them.
 - **Fullscreen is not reapplied.** A window's fullscreen state is captured but not
   restored (Phase-10 IN-03); a formerly-fullscreen window returns to its saved
   monitor/tag/floating-state/geometry but not its fullscreen flag.
@@ -333,13 +360,19 @@ wallpaper reapply, and touch remap — is **generic X11** and runs on **any bare
 window manager** with no window-management dependency. The window-management
 relocate/restore feature is a **strictly additive** layer that **requires** a dwm
 built with the [mihirlad55/dwm-ipc](https://github.com/mihirlad55/dwm-ipc) patch
-exposing `/tmp/dwm.sock`.
+exposing `${DWM_SOCKET:-/tmp/dwm.sock}`.
 
 On **any WM without that socket** — vanilla dwm, i3, a stock Raspberry Pi 4 dwm —
 the feature is **silently capability-gated off** and the display-layout daemon is
-**completely unaffected**: no dwm-ipc call is ever issued, no window is ever moved,
-and a machine with `WINDOW_MANAGEMENT` unset never even probes the socket. So
-adopting xrandrw on a bare-X11 box costs nothing and breaks nothing.
+**completely unaffected**: no dwm-ipc call is ever issued and no window is ever
+moved. With `WINDOW_MANAGEMENT` unset, the **daemon and watch paths never probe the
+socket at all** — the relocation coordinator's gate tests the config flag first and
+short-circuits, and the boot-time endpoint wait is skipped entirely, so a bare-X11
+box pays no probe and no boot delay. The one exception is the explicit
+`xrandrw --window-state` diagnostic, which probes the socket unconditionally before
+it reports the config flag, so that it can tell you *both* gates' states in one
+line. That is a manual, read-only command — nothing in normal operation. So adopting
+xrandrw on a bare-X11 box costs nothing and breaks nothing.
 
 This contract is not incidental — a dedicated **anti-regression CI suite**
 (`.github/workflows/regression.yml`, REG-01) runs the gate-off / RPi4-style path
@@ -395,8 +428,10 @@ ratchet, also dispatchable on demand).
 
 ## systemd user service
 
-Running `xrandrw --daemon` as a `--user` service (with `Restart=always` and
-`sd_notify` integration) is the intended deployment. There are two paths.
+Running `xrandrw --daemon` as a `--user` service (with `Restart=always`) is the
+intended deployment. The unit below is `Type=simple`: the daemon does send
+`sd_notify("READY=1")`, but under `Type=simple` systemd ignores it rather than
+treating it as a readiness gate. There are two paths.
 
 ### From a plain `pipx install` (no repo checkout)
 
@@ -510,8 +545,8 @@ That leaves no processes behind, but does not remove your data. To also drop the
 persistent state — the EDID-to-profile identity map and attach-order stack:
 
 ```bash
-rm -rf ~/.local/share/xrandrw          # state.json (honours XDG_DATA_HOME)
-rm -f  ~/.config/xrandrw.conf          # your config, if you made one
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/xrandrw"   # state.json (honours XDG_DATA_HOME)
+rm -f  ~/.config/xrandrw.conf                           # your config, if you made one
 ```
 
 Deleting `state.json` alone is also the way to **reset placement** without
@@ -519,7 +554,11 @@ uninstalling: the daemon rebuilds it from scratch on the next apply, forgetting
 every remembered monitor and side preference. The lock files live in
 `$XDG_RUNTIME_DIR` and are cleared on reboot, so they never need cleaning up.
 
-From a repo checkout, `make uninstall` does the first block for you.
+From a repo checkout, `make uninstall` does **most** of the first block: it stops
+and disables the unit and removes the copied unit file, the `~/.local/bin` entry
+point and the installed config sample. It does **not** run `systemctl --user
+daemon-reload` (it only prints a reminder), and it does **not** run `pipx uninstall
+xrandrw` — the pipx virtualenv survives. Run those two by hand afterwards.
 
 ## License
 

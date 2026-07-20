@@ -18,8 +18,13 @@ Design seam (mirrors ``RandRReader`` in ``xrandr.py``): transport (connect /
 send / recv) is kept separable from parsing. ``pack_header`` / ``parse_header``
 / ``decode_reply`` are PURE functions over bytes so the untrusted-input boundary
 (SEC-01) is unit-testable and fuzzable with no real dwm, no X, and no sockets.
-Every byte from the untrusted socket is validated here -- magic, hard size cap
-(before any allocation), size != 0, and JSON shape -- before any caller sees it.
+Every byte from the untrusted socket passes a transport-level check here before
+any caller sees it -- magic, hard size cap (enforced before any allocation),
+size != 0, and JSON-only decoding. JSON *shape* validation is a separate, opt-in
+layer: only the monitor and client replies run it (``validate_monitors`` /
+``validate_client``). ``run_command`` and ``subscribe`` deliberately return their
+decoded shapes unvalidated -- see SECURITY.md for the rationale -- so callers
+needing a specific shape must validate it themselves.
 """
 from __future__ import annotations
 

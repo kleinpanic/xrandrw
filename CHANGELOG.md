@@ -10,7 +10,10 @@ Adds an optional, capability-gated **window-management** subsystem: when a
 display is unplugged, windows on the removed output are relocated onto the
 surviving display without crashing dwm and with tiled-vs-floating state
 preserved; when it is plugged back in, the *same process* (identified by
-`(pid, starttime)`, never another instance) is moved back to where it was. The
+`(pid, starttime)`, never another instance) is moved back to where it was. That
+key also bounds the feature: because it is `(pid, starttime)` alone, **at most one
+window per process** is remembered and restored — multi-window processes get one
+window back, not all of them. The
 feature auto-detects a patched dwm's IPC socket and silently disables itself
 where absent (e.g. vanilla dwm / i3), leaving the existing display-layout
 behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
