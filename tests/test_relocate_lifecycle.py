@@ -1128,3 +1128,72 @@ def test_unconfirmed_focus_sends_no_mutating_verb(tmp_path, monkeypatch, logger,
         logged = [getattr(r, "event", None) for r in caplog.records]
         assert "relocate_focus_unconfirmed" in logged
         assert "relocate_restore" not in logged
+
+
+class CountingControl(MockControl):
+    """MockControl that COUNTS focus calls (mirrors test_regression_no_ipc)."""
+
+    def __init__(self, srv, events):
+        super().__init__(srv, events)
+        self.focus_calls = 0
+
+    def focus(self, xid):
+        self.focus_calls += 1
+        return super().focus(xid)
+
+
+def test_cycle_that_stole_no_focus_does_not_restore_focus(tmp_path, monkeypatch, logger):
+    """6b: a cycle that took NO focus must not hand any back.
+
+    `_restore_returned` guards the end-of-cycle focus give-back with
+    `if self._focus_calls > focus_calls_at_entry`. That gate had NO test at all --
+    replacing it with `if True:` left the suite fully green, and nothing in
+    tests/ so much as referenced `_focus_calls`.
+
+    What the gate prevents: a cycle where every displaced record is dropped on a
+    STALE IDENTITY issues no control call whatsoever (spike 004's hard rule --
+    never touch a reused PID's window). Without the gate such a cycle would still
+    call `_restore_focus`, yanking the selection to the snapshot's window. A
+    daemon that "restores" focus it never stole IS a gratuitous focus change --
+    precisely the churn UX-01 exists to remove.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = CountingControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        # The user's own window is selected at the STEADY settle, so the snapshot
+        # captures a real focus -- there IS something the daemon could wrongly
+        # hand back, which is what makes this test able to fail.
+        srv.select(ANCHOR)
+        coord.on_settled({}, logger)
+        assert coord._snapshot_focus == (0, ANCHOR)
+
+        _evacuate(orig_run, srv, sock, A)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # PID_A is REUSED by a different process: same pid, new starttime. Every
+        # displaced record now fails identity and is dropped WITHOUT any control
+        # call, so this cycle steals nothing.
+        _rewrite_starttime(tmp_path, PID_A, "a", ST_A + 999)
+
+        control.focus_calls = 0
+        events.clear()
+        _replug(outs, "DP-2")
+        coord.on_settled({}, logger)
+
+        assert (PID_A, ST_A) not in coord._displaced   # dropped on stale identity
+        assert control.focus_calls == 0, \
+            "a cycle that stole no focus must not issue a focus change of its own"
+        assert not any(e[0] == "cmd" for e in events), \
+            "a stale-identity drop must issue no dwm command at all"
