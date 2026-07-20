@@ -277,6 +277,91 @@ def test_holddown_bails_promptly_on_shutdown(monkeypatch, logger):
     assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"})) is False
 
 
+# ---------------- UX-02: the hold-down is actually WIRED to the apply path ----------------
+# Everything above hand-builds churn via _churn() and calls _bounce_settled directly, so
+# NOTHING proved _apply_if_changed populates that dict. Three defects survived the suite
+# with it green: deleting the baseline record, freezing apply_done_at, and unhooking
+# _bounce_settled from the loop entirely. An empty `prev` makes _bounce_settled return
+# False at watch.py:114, so the fix goes silently inert and the four-window replug returns
+# — indistinguishable from the bug coming back. These drive _apply_if_changed instead.
+
+
+def _fresh_churn(env):
+    # EXACTLY what watch_loop builds — no bounce keys. _apply_if_changed must add them.
+    return {
+        "times": [], "backoff": 0,
+        "window": int(env["EXCESS_WINDOW_SEC"]), "threshold": int(env["EXCESS_THRESHOLD"]),
+    }
+
+
+def _hash_script(monkeypatch, seq):
+    # Exact-length: an unexpected extra topology read raises StopIteration rather than
+    # quietly returning a stale hash.
+    it = iter(seq)
+    monkeypatch.setattr(watch, "topology_hash", lambda logger=None: next(it))
+
+
+def _record_applies(monkeypatch, applies):
+    def _apply(env, logger, event_source):
+        applies.append(event_source)
+        return True  # BL-01: a completed apply
+    monkeypatch.setattr(watch, "apply_once", _apply)
+    return applies
+
+
+def test_completed_apply_records_the_bounce_baseline(monkeypatch, logger):
+    # The wiring itself: without both of these keys the hold-down can never fire.
+    env = _benv()
+    churn = _fresh_churn(env)
+    applies = _record_applies(monkeypatch, [])
+    _hash_script(monkeypatch, ["h1", "h1", "h2"])  # cur, post-debounce verify, settled
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: {"eDP-1", "HDMI-1"})
+    monkeypatch.setattr(watch, "unhealed_connectors", lambda logger=None: [])
+
+    assert watch._apply_if_changed(env, logger, "h0", churn, False) == "h2"
+    assert applies == ["slow_poll"]
+    assert churn.get("present") == {"eDP-1", "HDMI-1"}, "no baseline -> hold-down is inert"
+    assert isinstance(churn.get("apply_done_at"), float), "no timestamp -> gate 1 never opens"
+
+
+def test_bounce_after_a_real_apply_never_reaches_apply_once_again(monkeypatch, logger):
+    # End-to-end consequence, driven only through _apply_if_changed: apply, then drop
+    # HDMI-1 and have it return. The second apply must NOT happen — that apply is the
+    # one whose scrub_stale --off makes dwm evacuate the just-restored windows.
+    env = _benv()
+    churn = _fresh_churn(env)
+    applies = _record_applies(monkeypatch, [])
+    present = {"now": {"eDP-1", "HDMI-1"}}
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: set(present["now"]))
+    monkeypatch.setattr(watch, "unhealed_connectors", lambda logger=None: [])
+    monkeypatch.setattr(watch.stop_evt, "wait", lambda t: False)
+    _hash_script(monkeypatch, ["h1", "h1", "h2",        # pass 1: the genuine apply
+                               "h_dark", "h_dark",      # pass 2: the bounce's dark read
+                               "h2"])                   # ...which resolves back inside the hold
+
+    last = watch._apply_if_changed(env, logger, "h0", churn, False)
+    assert applies == ["slow_poll"] and last == "h2"
+
+    present["now"] = {"eDP-1"}  # HDMI-1 drops
+    assert watch._apply_if_changed(env, logger, last, churn, True) == "h2"
+    assert applies == ["slow_poll"], "the bounce must be absorbed, not applied"
+
+
+def test_holddown_zero_records_no_baseline_and_costs_no_read(monkeypatch, logger):
+    # Kill-switch: the documented off state must leave the apply path byte-identical to
+    # pre-UX-02 — no baseline stored and not one extra RandR read paid for.
+    env = _benv(hold="0")
+    churn = _fresh_churn(env)
+    applies = _record_applies(monkeypatch, [])
+    _hash_script(monkeypatch, ["h1", "h1", "h2"])
+    monkeypatch.setattr(watch, "present_connectors", _unreachable_present)
+    monkeypatch.setattr(watch, "unhealed_connectors", lambda logger=None: [])
+
+    assert watch._apply_if_changed(env, logger, "h0", churn, False) == "h2"
+    assert applies == ["slow_poll"]
+    assert "present" not in churn and "apply_done_at" not in churn
+
+
 def _unreachable_hash(logger=None):
     raise AssertionError("topology must not be re-read on this path")
 
