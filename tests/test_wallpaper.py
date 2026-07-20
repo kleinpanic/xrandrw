@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import xrandrw.wallpaper as wp
-from xrandrw.wallpaper import select_wallpaper_backend
+from xrandrw.wallpaper import select_wallpaper_backend, wallpaper_backend_chain
 
 
 @pytest.fixture
@@ -13,6 +13,136 @@ def logger():
     lg = logging.getLogger("xrandrw.test_wallpaper")
     lg.setLevel(logging.DEBUG)
     return lg
+
+
+# ---------------- backend-failure fallthrough (WP-01) ----------------
+
+class _FakeRun:
+    # Records every argv and returns a caller-chosen rc per binary, so a test can make a
+    # backend FAIL for real instead of assuming "we ran a command" == "it worked".
+    def __init__(self, rc_by_binary: dict[str, int]):
+        self.rc_by_binary = rc_by_binary
+        self.cmds: list[list[str]] = []
+
+    def __call__(self, cmd, logger=None, **kw):
+        self.cmds.append(list(cmd))
+        from subprocess import CompletedProcess
+        return CompletedProcess(cmd, self.rc_by_binary.get(cmd[0], 0))
+
+    @property
+    def binaries(self) -> list[str]:
+        return [c[0] for c in self.cmds]
+
+
+def _events(caplog) -> list[str]:
+    return [getattr(r, "event", None) for r in caplog.records]
+
+
+def _only(caplog, event: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if getattr(r, "event", None) == event]
+
+
+@pytest.fixture
+def wall_file(tmp_path):
+    p = tmp_path / "wall.png"
+    p.write_bytes(b"x")
+    return str(p)
+
+
+def _present(monkeypatch, *names: str):
+    # Only `names` exist on PATH, for both select/chain and the per-backend guards.
+    monkeypatch.setattr(wp.shutil, "which", lambda n: f"/usr/bin/{n}" if n in names else None)
+
+
+def test_chain_order():
+    # Auto-detect builds a full fallthrough chain, always terminated by native.
+    assert wallpaper_backend_chain({}, True, True, True) == ["fehbg", "feh", "native"]
+    assert wallpaper_backend_chain({"USE_XWALLPAPER": "1"}, True, True, True) == [
+        "xwallpaper", "fehbg", "feh", "native"]
+    assert wallpaper_backend_chain({}, False, False, False) == ["native"]
+
+    # An explicitly configured engine is a ONE-entry chain: no silent substitution.
+    assert wallpaper_backend_chain({"WALLPAPER_ENGINE": " FEH "}, True, True, True) == ["feh"]
+
+    # The chain head always agrees with the documented single-backend selector.
+    for env in ({}, {"USE_XWALLPAPER": "1"}, {"WALLPAPER_ENGINE": "native"}):
+        assert wallpaper_backend_chain(env, True, True, True)[0] == \
+            select_wallpaper_backend(env, True, True, True)
+
+
+def test_nonzero_returncode_is_detected(monkeypatch, logger, caplog, wall_file):
+    # The core WP-01 hole: a failing backend used to log "wallpaper" as though it worked.
+    _present(monkeypatch, "feh")
+    fake = _FakeRun({"feh": 1})
+    monkeypatch.setattr(wp, "run", fake)
+    monkeypatch.setattr(wp, "_native_wallpaper", lambda env, lg: False)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file}, logger)
+
+    failed = _only(caplog, "wallpaper_failed")
+    assert failed, "a non-zero backend returncode must log wallpaper_failed"
+    assert failed[0].levelno == logging.WARNING
+    assert failed[0].backend == "feh" and failed[0].rc == 1
+    assert "wallpaper" not in _events(caplog), "a failed backend must not log success"
+
+
+def test_failed_backend_falls_through_to_next(monkeypatch, logger, caplog, wall_file):
+    # fehbg fails -> feh must actually be TRIED, and its success ends the chain.
+    _present(monkeypatch, "fehbg", "feh")
+    fake = _FakeRun({"fehbg": 1, "feh": 0})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file}, logger)
+
+    assert fake.binaries == ["fehbg", "feh"], "a failed backend must fall through to the next"
+    assert _only(caplog, "wallpaper_failed")[0].backend == "fehbg"
+    assert [r.msg for r in _only(caplog, "wallpaper")][0].startswith("feh")
+    assert "wallpaper_exhausted" not in _events(caplog)
+
+
+def test_configured_engine_does_not_fall_through(monkeypatch, logger, caplog, wall_file):
+    # WP-01: an explicitly named engine is respected -- warn, never substitute another.
+    _present(monkeypatch, "fehbg", "feh")
+    fake = _FakeRun({"feh": 1, "fehbg": 0})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file, "WALLPAPER_ENGINE": "feh"}, logger)
+
+    assert fake.binaries == ["feh"], "a configured engine must never fall through to another"
+    assert _only(caplog, "wallpaper_failed")[0].backend == "feh"
+
+
+def test_all_backends_failing_logs_exhausted(monkeypatch, logger, caplog, wall_file):
+    _present(monkeypatch, "fehbg", "feh")
+    fake = _FakeRun({"fehbg": 1, "feh": 3})
+    monkeypatch.setattr(wp, "run", fake)
+    monkeypatch.setattr(wp, "_native_wallpaper", lambda env, lg: False)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file}, logger)  # must never raise
+
+    assert fake.binaries == ["fehbg", "feh"]
+    assert [r.backend for r in _only(caplog, "wallpaper_failed")] == ["fehbg", "feh"]
+    exhausted = _only(caplog, "wallpaper_exhausted")
+    assert exhausted, "every backend failing must log wallpaper_exhausted"
+    assert exhausted[0].levelno == logging.WARNING
+
+
+def test_missing_binary_still_skips_without_failing(monkeypatch, logger, caplog, wall_file):
+    # The pre-existing, already-correct case: nothing ran, so nothing "failed".
+    _present(monkeypatch)
+    monkeypatch.setattr(wp, "run", _FakeRun({}))
+    monkeypatch.setattr(wp, "_HAVE_PIL", False)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": wall_file}, logger)
+
+    assert _only(caplog, "wallpaper_native_skip")
+    assert "wallpaper_failed" not in _events(caplog)
+    assert "wallpaper_exhausted" not in _events(caplog)
 
 
 def test_select():
