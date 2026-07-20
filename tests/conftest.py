@@ -3,7 +3,7 @@ from typing import Callable
 
 import pytest
 
-from xrandrw import dwmipc
+from xrandrw import config, dwmipc
 from xrandrw.xrandr import Output
 
 
@@ -14,6 +14,34 @@ def isolate_state(tmp_path, monkeypatch):
     # redirecting it per-test sandboxes all state I/O — even for tests that call
     # apply_once/set_pref without patching load_state/save_state directly.
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+
+@pytest.fixture(autouse=True)
+def isolate_config(tmp_path, monkeypatch):
+    # Hard guarantee, same contract as isolate_state above: no test may ever read
+    # the DEVELOPER'S real /etc/xdg/xrandrw.conf or ~/.config/xrandrw.conf.
+    #
+    # Found the hard way. config.CONF_USER is `Path.home() / ".config/xrandrw.conf"`
+    # resolved at import, so the whole suite silently inherited whatever the person
+    # running it had configured. The moment WINDOW_MANAGEMENT=1 was set on this
+    # machine to run the daemon for real, test_main_window_state_returns_int_...
+    # started failing -- a test whose own comment says "Feature default-off" was
+    # asserting the default while reading a live user override. It had only ever
+    # passed because nobody who ran it also USED the tool; CI passes for the same
+    # accidental reason (no user config on a runner). That is a test passing for the
+    # wrong reason, which is indistinguishable from a test that does not work.
+    #
+    # An env-only guard is not enough: CONF_USER is Path.home()-based, not
+    # XDG_CONFIG_HOME-based, so setting XDG_CONFIG_HOME does nothing. Override the
+    # module attributes themselves and clear every ENV_DEFAULTS key, so both config
+    # tiers AND the process-environment tier start from a known-empty state.
+    #
+    # Tests that WANT a config (test_config.py's isolated_config) request their own
+    # fixture, which runs after this one and repoints the same attributes.
+    monkeypatch.setattr(config, "CONF_SYS", tmp_path / "no-such-sys.conf")
+    monkeypatch.setattr(config, "CONF_USER", tmp_path / "no-such-user.conf")
+    for key in config.ENV_DEFAULTS:
+        monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(autouse=True)
