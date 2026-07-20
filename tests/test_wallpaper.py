@@ -260,3 +260,159 @@ def test_native_calls(monkeypatch, tmp_path, logger):
 
     # RetainPermanent is mandatory — else the pixmap is freed on disconnect (black root).
     assert ("set_close_down_mode", wp.X.RetainPermanent) in calls
+
+
+# ---------------- GAP-D: the native backend's DEGRADED RETURN VALUE ----------------
+#
+# _native_wallpaper's except-arm returned False; flipping it to True left the suite
+# green because the only existing native tests asserted "it didn't crash". That is
+# the WP-01 bug one layer down: _try_backend hands that value straight to
+# apply_wallpaper's chain loop, so a native backend that failed would be believed,
+# the loop would stop, and the daemon would report a wallpaper it never set.
+
+def _failing_display(monkeypatch, wall_file):
+    # PIL present and the file readable, so we get PAST both skip guards and into
+    # the try-block -- then the X round-trip dies, the realistic failure (no
+    # DISPLAY, server gone mid-apply, pixmap alloc refused).
+    monkeypatch.setattr(wp, "_HAVE_PIL", True)
+    monkeypatch.setattr(wp, "Image", MagicMock())
+
+    def boom():
+        raise ConnectionError("can't connect to display")
+
+    monkeypatch.setattr(wp.display, "Display", boom)
+    return {"WALL": wall_file}
+
+
+def test_native_backend_returns_false_when_the_x_write_fails(
+        monkeypatch, logger, caplog, wall_file):
+    env = _failing_display(monkeypatch, wall_file)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        result = wp._native_wallpaper(env, logger)
+
+    assert result is False, \
+        "a failed native apply must report failure, not merely avoid crashing"
+    failed = _only(caplog, "wallpaper_native_fail")
+    assert failed and failed[0].levelno == logging.WARNING
+    assert "can't connect to display" in failed[0].error
+    assert "wallpaper" not in _events(caplog), "a failed apply must not log success"
+
+
+def test_try_backend_hands_the_native_failure_to_the_chain(monkeypatch, logger, wall_file):
+    # The exact value _try_backend feeds the chain loop. False means "failed, keep
+    # going"; True would end the loop having done nothing.
+    env = _failing_display(monkeypatch, wall_file)
+    assert wp._try_backend("native", env, logger) is False
+
+
+def test_failing_native_backend_is_never_reported_as_a_successful_apply(
+        monkeypatch, logger, caplog, wall_file):
+    # Chain consequence. No feh/fehbg/xwallpaper on PATH => the chain is ["native"]
+    # alone; native fails => the pass must end in wallpaper_exhausted, NOT silence.
+    _present(monkeypatch)
+    env = _failing_display(monkeypatch, wall_file)
+    fake = _FakeRun({})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper(env, logger)   # must never raise
+
+    assert fake.cmds == [], "the native tier shells out to nothing"
+    assert "wallpaper" not in _events(caplog), \
+        "believing a failed native apply is exactly the WP-01 bug"
+    exhausted = _only(caplog, "wallpaper_exhausted")
+    assert exhausted, "the last backend failing must surface as wallpaper_exhausted"
+    assert exhausted[0].levelno == logging.WARNING
+
+
+def test_native_failure_after_feh_failure_still_exhausts_the_chain(
+        monkeypatch, logger, caplog, wall_file):
+    # feh fails -> native is genuinely TRIED (not short-circuited) -> it fails too
+    # -> exhausted. Pins that False from native keeps the chain honest end to end.
+    _present(monkeypatch, "feh")
+    env = _failing_display(monkeypatch, wall_file)
+    fake = _FakeRun({"feh": 1})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper(env, logger)
+
+    assert fake.binaries == ["feh"]
+    assert [r.backend for r in _only(caplog, "wallpaper_failed")] == ["feh"]
+    assert _only(caplog, "wallpaper_native_fail")
+    assert _only(caplog, "wallpaper_exhausted")
+
+
+def test_native_skip_and_native_failure_are_distinct_values(
+        monkeypatch, logger, tmp_path, wall_file):
+    # The three-valued contract _try_backend documents: None = terminal skip (stop
+    # the chain, nothing was wrong), False = this backend failed (try the next).
+    # Collapsing them would either mask a real failure or spam a pointless retry.
+    monkeypatch.setattr(wp, "_HAVE_PIL", True)
+    monkeypatch.setattr(wp, "Image", MagicMock())
+    missing = {"WALL": str(tmp_path / "gone.png")}
+    assert wp._native_wallpaper(missing, logger) is None
+
+    monkeypatch.setattr(wp, "_HAVE_PIL", False)
+    assert wp._native_wallpaper({"WALL": wall_file}, logger) is None
+
+    assert wp._native_wallpaper(_failing_display(monkeypatch, wall_file), logger) is False
+
+
+def test_native_success_returns_true_and_ends_the_chain(monkeypatch, logger, caplog, wall_file):
+    # The positive half of the same contract, so "always return False" dies too.
+    _present(monkeypatch)
+    monkeypatch.setattr(wp, "_HAVE_PIL", True)
+    monkeypatch.setattr(wp, "Image", MagicMock())
+    monkeypatch.setattr(wp.display, "Display", lambda: MagicMock())
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        assert wp._try_backend("native", {"WALL": wall_file}, logger) is True
+        wp.apply_wallpaper({"WALL": wall_file}, logger)
+
+    assert "wallpaper_exhausted" not in _events(caplog)
+    applied = _only(caplog, "wallpaper")
+    assert len(applied) == 2, "one success per call: the direct one and the chain one"
+    assert all(r.msg.startswith("native") and r.file == wall_file for r in applied)
+
+
+# ---------------- per-backend availability guards ----------------
+
+def test_xwallpaper_runs_and_skips_on_its_own_guards(monkeypatch, logger, caplog, tmp_path, wall_file):
+    env = {"WALL": wall_file, "USE_XWALLPAPER": "1"}
+    _present(monkeypatch, "xwallpaper")
+    fake = _FakeRun({"xwallpaper": 0})
+    monkeypatch.setattr(wp, "run", fake)
+
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper(env, logger)
+    assert fake.cmds == [["xwallpaper", "--zoom", wall_file]]
+
+    # Binary present but the image is gone => terminal skip, nothing executed.
+    caplog.clear()
+    fake2 = _FakeRun({})
+    monkeypatch.setattr(wp, "run", fake2)
+    with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+        wp.apply_wallpaper({"WALL": str(tmp_path / "gone.png"), "WALLPAPER_ENGINE": "xwallpaper"},
+                           logger)
+    assert fake2.cmds == []
+    assert _only(caplog, "wallpaper_skip")
+
+
+def test_configured_engine_missing_its_binary_skips_without_substituting(
+        monkeypatch, logger, caplog, wall_file):
+    # A named engine whose binary is absent must skip cleanly -- never silently
+    # fall through to another backend, and never claim success.
+    for engine in ("fehbg", "feh"):
+        _present(monkeypatch)
+        fake = _FakeRun({})
+        monkeypatch.setattr(wp, "run", fake)
+        caplog.clear()
+
+        with caplog.at_level(logging.INFO, logger="xrandrw.test_wallpaper"):
+            wp.apply_wallpaper({"WALL": wall_file, "WALLPAPER_ENGINE": engine}, logger)
+
+        assert fake.cmds == [], engine
+        assert _only(caplog, "wallpaper_skip"), engine
+        assert "wallpaper" not in _events(caplog), engine
