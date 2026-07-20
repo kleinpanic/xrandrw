@@ -68,6 +68,46 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   instead of being silently treated as success, and `tagmon` never emits a
   negative direction — some dwm-ipc builds reject a negative argument outright.
   This was latent on 3-or-more-monitor setups only.
+- The wallpaper backends now verify that the wallpaper was actually applied and
+  fall through to the next candidate on failure, instead of treating "the command
+  ran" as success.
+
+### Packaging
+- `requires-python = ">=3.9"` is now declared, matching what the CI matrix
+  actually tests, so `pip` will not install the package onto an older interpreter.
+- Per-version Python classifiers (3.9 – 3.13) added, so PyPI shows a real
+  supported-version range rather than a bare "3".
+- The sdist now ships the operator-facing files (config sample, systemd unit)
+  that were previously missing from it. Because a wheel unpacks into
+  `site-packages` where `systemctl --user` cannot reach it, the README now also
+  inlines the unit file for `pipx` users.
+
+### Documentation
+- **The release gate on the live-hardware verify stamp now checks freshness
+  rather than mere existence.** It previously tested only that the stamp file
+  existed, so it would have passed on any future commit regardless of drift. It
+  now verifies the stamp certifies the release's own version, that the verified
+  commit is an ancestor of the tag, and fails if `src/xrandrw/` changed since —
+  with a sha-pinned, reasoned waiver as the only escape hatch.
+- Corrected a number of claims that had drifted from the code: `--watch` and
+  `--daemon` run the identical event-driven loop (they were documented as polling
+  vs event-driven); `POLL_INTERVAL` is a slow safety-net timeout, not the hotplug
+  detection mechanism; `LOCKFILE` defaults to `$XDG_RUNTIME_DIR`, never
+  world-writable `/tmp`; relocation keys on `(pid, starttime)`, not PID; the
+  functional test tier needs a real X server and dwm rather than being
+  display-free; `LAYOUT_*` matching is exact set equality and is config-file-only;
+  and the README lede no longer claims the project is pure standard library.
+- The shipped `xrandrw.conf.sample` no longer contains `$HOME`-prefixed paths.
+  Config files are not shell-sourced, so those were stored as literal unexpanded
+  strings and could never resolve — making the sample worse than the built-in
+  defaults it overrode. The no-expansion rule is now stated explicitly.
+- `--window-state`'s real output schema is documented, including the `reason` key
+  and the fact that `displaced` is always empty from the CLI.
+- Added scope (X11 only; expect conflicts with GNOME/KDE), a prerequisites table
+  separating required from optional binaries, uninstall instructions, and a
+  warning that the shipped unit's `dwm-session.target` will silently stop pulling
+  the service in after a reboot on systems that do not define that target.
+- Repo-file links are now absolute GitHub URLs so they resolve on PyPI.
 
 ### Notes
 - Fullscreen state is captured but not reapplied on restore; cross-monitor moves
