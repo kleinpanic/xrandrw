@@ -71,6 +71,13 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
 - The wallpaper backends now verify that the wallpaper was actually applied and
   fall through to the next candidate on failure, instead of treating "the command
   ran" as success.
+- A restore that does not actually take effect is now reported honestly. When an
+  essential step (`tagmon`/`tag`) fails to land — most often because the
+  crash-safety gate refused a move that would have segfaulted a
+  `single-window-center` dwm — the daemon logs `relocate_restore_incomplete` at
+  WARNING and **keeps** the displaced record so a later cycle retries it.
+  Previously such a cycle logged success and discarded the record, so the window
+  was never restored and nothing said so.
 
 ### Packaging
 - `requires-python = ">=3.9"` is now declared, matching what the CI matrix

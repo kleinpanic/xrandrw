@@ -244,6 +244,16 @@ control socket at `/tmp/dwm.sock`. On any window manager without that IPC endpoi
 and your display layout is entirely unaffected — nothing to configure, nothing to
 break.
 
+It also needs that dwm to **focus a window when it receives `_NET_ACTIVE_WINDOW`**
+(the `focusonnetactive` behaviour). Restoring a window means selecting it first,
+and the only handle xrandrw has is sending `_NET_ACTIVE_WINDOW` to the root
+window — but **stock dwm's `clientmessage` answers that atom with `seturgent()`
+alone and never changes the selection**. When focus cannot be confirmed the daemon
+**aborts that window's restore** instead of issuing `tag`/`tagmon` against an
+unconfirmed selection, which would otherwise retag and move whatever window *you*
+had focused. So on a dwm-ipc dwm lacking `focusonnetactive`, relocation degrades
+to a safe no-op and logs `relocate_focus_unconfirmed` at WARNING.
+
 **Enable it** by setting `WINDOW_MANAGEMENT=1` (env or config file). Effective-on
 is `WINDOW_MANAGEMENT=1` **and** a live dwm-ipc endpoint; either missing means the
 subsystem is a no-op.
@@ -287,6 +297,21 @@ daemon's `relocate_*` log events (`LOG_LEVEL=debug`) rather than this command.
   the first monitor's windows are restored onto the new one. Windows are keyed by
   connector name (`HDMI-1`), and although each record captures the monitor's EDID
   it is not currently consulted on restore.
+- **A restore is skipped when the move would leave the source monitor empty and
+  the destination holding a single window.** That exact pair of conditions —
+  no visible client left behind, some monitor ending at exactly one tiled client
+  — is what segfaults dwm builds carrying the `single-window-center` patch, whose
+  `tile()` dereferences `selmon->sel` after `focus(NULL)` has just nulled it. The
+  daemon refuses the move rather than risk taking your window manager down with
+  it. **This is most likely to bite when your two monitors are showing different
+  tags**, because a window restored onto a tag you are not currently viewing is
+  invisible on arrival and does not count toward the source monitor's visible
+  set. The window is *not* lost: it stays on its current monitor with its
+  original tag — switching to that tag reveals it — and the record is kept, so a
+  later relocation cycle retries once the move is safe. The cause is a missing
+  NULL guard in that dwm patch, not in xrandrw; on a dwm without the patch the
+  restriction does not apply. Look for `relocate_tagmon_unsafe` and
+  `relocate_restore_incomplete` at WARNING.
 - **Mirrored outputs get no mapping, so relocation silently does nothing there.**
   Two outputs both connected at identical position and mode are genuinely
   ambiguous, and the dwm-monitor→connector matcher refuses to guess: it returns
