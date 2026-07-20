@@ -71,6 +71,56 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   addition to the headless suite. Other hardware and multi-head configurations
   are covered by the automated tests only.
 
+## [0.1.1] - 2026-07-18
+
+Correctness pass over placement persistence, internal-panel detection, and the
+event loop, plus touchscreen remapping and the first real CI.
+
+### Added
+- `TOUCH_MAP` config key — re-maps touch/stylus devices to their output after
+  *every* apply. `xinput map-to-output` bakes in the output's geometry at call
+  time, so a one-shot login-time remap goes stale whenever a panel moves
+  (plug/unplug/side-swap); re-applying per-apply is the fix. Format
+  `"<device-substring>:<OUTPUT>[;...]"`, case-insensitive, multiple devices
+  supported. Empty by default, so `xinput` stays an optional dependency. Never
+  maps onto a disconnected output.
+- CI (`ci.yml`): `pytest` across Python 3.9 / 3.11 / 3.13 and a `vulture`
+  dead-code job, both in virtualenvs.
+- Release automation (`release.yml`): building on a published GitHub Release,
+  attaching artifacts, and uploading to PyPI via `PYPI_API_TOKEN`.
+- PyPI version/pyversions/license badges in the README.
+
+### Changed
+- **State file location.** `state_path()` now honours `XDG_DATA_HOME` and is
+  resolved at call time rather than frozen into a module constant. If you have
+  `XDG_DATA_HOME` set to something other than `~/.local/share`, your `state.json`
+  moves accordingly — the remembered EDID-to-profile map and attach-order stack
+  live at `$XDG_DATA_HOME/xrandrw/state.json`. Unset, the path is unchanged.
+- The systemd helper unit no longer declares a backwards
+  `Wants=dwm-session.target`; a session helper should only `WantedBy` + `PartOf`
+  its session target.
+
+### Fixed
+- **`--set-pref` had no effect on placement.** `apply_once` placed externals by
+  attach-stack *index* and never read `preferred_side`; its only reader was dead
+  code. A monitor explicitly set `left-of` still landed `right-of`, defeating the
+  core "put monitors where you left them" promise. Placement now takes
+  `(item, preferred_side)` pairs — each display lands on its stored side,
+  collisions fall back to the next free side, and chains of 5+ externals still
+  resolve.
+- **The internal panel is now always primary on DSI/DPI hardware.** Internal-LCD
+  detection matched only `eDP`/`LVDS`, so on a Raspberry Pi (DSI) the built-in
+  panel was not forced primary and won only by alphabetical luck in the
+  no-internal fallback path. `DSI` and `DPI` now qualify.
+- **No more redundant second apply on every hotplug.** `apply_once`'s own
+  `xrandr` calls emit RandR notifications; the watch loop returned the *pre*-apply
+  topology hash, so the settled post-apply state read as a fresh change and
+  triggered an idempotent-but-wasteful second apply. It now returns the
+  post-apply hash and absorbs its own events.
+- Tests can no longer read or write the real `~/.local/share/xrandrw/state.json`
+  — an autouse fixture redirects `XDG_DATA_HOME` per test, closing a hole where
+  unisolated `apply_once` tests wrote junk outputs into live user state.
+
 ## [0.1.0] - 2026-07-05
 
 Initial packaged baseline. This tags the still-hardcoded, as-yet-untested code
