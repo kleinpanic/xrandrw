@@ -1,7 +1,6 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from xrandrw.logging_utils import _LEVEL_MAP
 
@@ -22,10 +21,13 @@ ENV_DEFAULTS = {
     "TOUCH_MAP": "",                       # ""=off | "devname:OUTPUT;..." remap touch after each apply
     "EXCESS_WINDOW_SEC": "20",             # burst window
     "EXCESS_THRESHOLD": "4",               # applies within window -> warn+backoff
+    "WINDOW_MANAGEMENT": "0",              # 0=off (opt-in) / 1=enable dwm-ipc window relocation (WM-07)
+    "BOUNCE_SUSPECT_MS": "5000",           # a disconnect this soon after an apply is bounce-SUSPECT (UX-02)
+    "BOUNCE_HOLDDOWN_MS": "3000",          # ...so re-read for this long before believing it; 0 disables
 }
 
-def _load_env_file(path: Path) -> Dict[str, str]:
-    env: Dict[str, str] = {}
+def _load_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
     if not path.is_file():
         return env
     for line in path.read_text(errors="ignore").splitlines():
@@ -53,21 +55,21 @@ def resolve_lock_dir() -> Path:
     return d
 
 # Pure numeric guard: malformed config degrades to default instead of crashing (D-05).
-def _coerce_int(raw: str, default: str, minimum: int, use_float: bool = False) -> Tuple[int, Optional[str]]:
+def _coerce_int(raw: str, default: str, minimum: int, use_float: bool = False) -> tuple[int, str | None]:
     try:
         v = int(float(raw)) if use_float else int(raw)
         return max(minimum, v), None
     except (ValueError, TypeError):
         return max(minimum, int(default)), f"invalid value {raw!r}, using default {default!r}"
 
-def load_config() -> Tuple[Dict[str, str], List[str]]:
+def load_config() -> tuple[dict[str, str], list[str]]:
     env = dict(ENV_DEFAULTS)
     env.update(_load_env_file(CONF_SYS))
     env.update(_load_env_file(CONF_USER))
-    for k in ENV_DEFAULTS.keys():
+    for k in ENV_DEFAULTS:
         if k in os.environ:
             env[k] = os.environ[k]
-    warnings: List[str] = []
+    warnings: list[str] = []
 
     def coerce(key: str, minimum: int, use_float: bool = False) -> str:
         v, w = _coerce_int(env[key], ENV_DEFAULTS[key], minimum, use_float)
@@ -76,6 +78,7 @@ def load_config() -> Tuple[Dict[str, str], List[str]]:
         return str(v)
 
     env["USE_XWALLPAPER"] = "1" if env["USE_XWALLPAPER"] in ("1", "true", "yes") else "0"
+    env["WINDOW_MANAGEMENT"] = "1" if env["WINDOW_MANAGEMENT"] in ("1", "true", "yes") else "0"
     env["HIDPI_WIDTH"] = coerce("HIDPI_WIDTH", 0)
     env["POLL_INTERVAL"] = coerce("POLL_INTERVAL", 5, use_float=True)
     if env["APPLY_BACKEND"] not in ("subprocess", "native"):
@@ -86,6 +89,9 @@ def load_config() -> Tuple[Dict[str, str], List[str]]:
         env["LOG_LEVEL"] = "notice"
     env["EXCESS_WINDOW_SEC"] = coerce("EXCESS_WINDOW_SEC", 5)
     env["EXCESS_THRESHOLD"] = coerce("EXCESS_THRESHOLD", 2)
+    # minimum 0 on BOTH: 0 is the documented kill-switch for the bounce hold-down (UX-02).
+    env["BOUNCE_SUSPECT_MS"] = coerce("BOUNCE_SUSPECT_MS", 0)
+    env["BOUNCE_HOLDDOWN_MS"] = coerce("BOUNCE_HOLDDOWN_MS", 0)
 
     if env["LOCKFILE"] == ENV_DEFAULTS["LOCKFILE"]:
         env["LOCKFILE"] = str(resolve_lock_dir() / "xrandrw.lock")

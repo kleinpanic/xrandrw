@@ -1,0 +1,77 @@
+name: Mutation (TEST-06)
+
+# SEPARATE from ci.yml on purpose: mutation testing is slow (~10-40 min) and noisy, so it runs
+# NIGHTLY + on-demand only -- NEVER per-PR -- and therefore can never block the fast unit gate.
+on:
+  schedule:
+    - cron: "0 4 * * *"   # nightly at 04:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # B1 (false-0-kill) fix: install runtime + pytest + mutmut ONLY. NEVER do an editable
+      # install of this package -- the editable `.pth` + pytest `pythonpath=["src"]` shadow
+      # mutmut's mutated `mutants/src` copy with un-mutated source, so every mutant falsely
+      # "survives" while `mutmut run` still exits 0. `pip uninstall -y xrandrw` guarantees no
+      # editable/wheel install lingers.
+      - name: Build NON-editable venv (no -e install)
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install "python-xlib>=0.31" pytest "mutmut==3.6.*"
+          pip uninstall -y xrandrw || true
+
+      # STEP 1 -- the sanity-kill runs FIRST. It stands up its OWN throwaway non-editable venv
+      # and asserts the runner killed >=1 parse_header mutant; a runner that reports 0 kills
+      # exits non-zero here and FAILS the job before any baseline gate is trusted.
+      - name: Sanity-kill (prove the runner kills before trusting the gate)
+        run: bash ci/mutation_sanity_kill.sh
+
+      # STEP 2 -- full scoped run. mutmut exits 0 even when everything survives, so `|| true`
+      # and never trust its exit code; the gate below reads the real numbers.
+      - name: Run mutmut over the 3 window-mgmt modules
+        run: |
+          . .venv/bin/activate
+          rm -rf mutants
+          mutmut run || true
+
+      # STEP 3 -- baseline+ratchet gate. mutmut 3.6 `mutmut results` lists ONLY survivors and
+      # NEVER prints a `: killed` line, so the authoritative counts come from the
+      # export-cicd-stats JSON (`killed`, `survived`). The gate is a HARD FAIL when killed < 1
+      # (that IS the B1 trap) AND when survivors EXCEED the committed SURVIVOR_BASELINE ratchet.
+      - name: Ratchet gate (killed >= 1 AND survivors <= baseline)
+        run: |
+          . .venv/bin/activate
+          mutmut export-cicd-stats >/dev/null 2>&1 || true
+          python - <<'PY'
+          import json, re, sys, pathlib
+          stats = json.load(open("mutants/mutmut-cicd-stats.json"))
+          killed = int(stats.get("killed", 0))
+          survived = int(stats.get("survived", 0))
+          text = pathlib.Path("tests/mutation-baseline.txt").read_text()
+          m = re.search(r"^SURVIVOR_BASELINE\s*=\s*(\d+)", text, re.M)
+          baseline = int(m.group(1)) if m else 0
+          print(f"killed={killed} survived={survived} baseline={baseline}")
+          if killed < 1:
+              sys.exit("FAIL: 0 mutants killed -- the B1 false-0-kill trap is NOT defeated.")
+          if survived > baseline:
+              sys.exit(f"FAIL: survivors {survived} EXCEED baseline {baseline} (a regression).")
+          print("PASS: runner kills and survivors are within the ratchet baseline.")
+          PY

@@ -1,7 +1,6 @@
 from __future__ import annotations
 import logging
 import re
-from typing import Dict, List, Tuple
 
 from xrandrw.logging_utils import run, logev
 
@@ -12,10 +11,10 @@ from xrandrw.logging_utils import run, logev
 # wherever it lands. Driven by the TOUCH_MAP config key; a no-op (no xinput dependency)
 # when unset.
 
-def parse_touch_map(env: Dict[str, str]) -> List[Tuple[str, str]]:
+def parse_touch_map(env: dict[str, str]) -> list[tuple[str, str]]:
     # TOUCH_MAP="ft5x06:DSI-1;ELAN Touchscreen:eDP-1" -> [("ft5x06","DSI-1"), ...]
     # rpartition on ':' so device names may themselves contain a colon.
-    pairs: List[Tuple[str, str]] = []
+    pairs: list[tuple[str, str]] = []
     for chunk in (env.get("TOUCH_MAP", "") or "").split(";"):
         chunk = chunk.strip()
         if ":" not in chunk:
@@ -25,13 +24,13 @@ def parse_touch_map(env: Dict[str, str]) -> List[Tuple[str, str]]:
             pairs.append((name.strip(), output.strip()))
     return pairs
 
-def resolve_touch_remaps(mappings: List[Tuple[str, str]],
-                         devices: List[Tuple[int, str]],
-                         connected: set) -> List[Tuple[int, str]]:
+def resolve_touch_remaps(mappings: list[tuple[str, str]],
+                         devices: list[tuple[int, str]],
+                         connected: set) -> list[tuple[int, str]]:
     # Pure: for each (name-substr, output) whose output is currently connected, match the
     # first input device whose name contains the substring (case-insensitive). One device
     # per mapping. Skips mappings whose output is absent so we never map onto a dead head.
-    out: List[Tuple[int, str]] = []
+    out: list[tuple[int, str]] = []
     for substr, output in mappings:
         if output not in connected:
             continue
@@ -41,9 +40,9 @@ def resolve_touch_remaps(mappings: List[Tuple[str, str]],
                 break
     return out
 
-def _list_input_devices(logger: logging.Logger) -> List[Tuple[int, str]]:
+def _list_input_devices(logger: logging.Logger) -> list[tuple[int, str]]:
     cp = run(["xinput", "list", "--short"], logger=logger)
-    devices: List[Tuple[int, str]] = []
+    devices: list[tuple[int, str]] = []
     if cp.returncode != 0:
         return devices
     for line in cp.stdout.splitlines():
@@ -54,7 +53,7 @@ def _list_input_devices(logger: logging.Logger) -> List[Tuple[int, str]]:
         devices.append((int(m.group(1)), name))
     return devices
 
-def remap_touch(env: Dict[str, str], connected: set, logger: logging.Logger) -> None:
+def remap_touch(env: dict[str, str], connected: set, logger: logging.Logger) -> None:
     mappings = parse_touch_map(env)
     if not mappings:
         return

@@ -1,0 +1,52 @@
+name: Anti-Regression (no dwm-ipc)
+
+# REG-01: run the anti-regression matrix explicitly WITHOUT a dwm-ipc endpoint,
+# proving the gated-off / vanilla-dwm / RPi4-style path stays green as the
+# window-mgmt code churns. A guard step asserts no /tmp/dwm.sock is present and
+# empties DWM_SOCKET so dwmipc.DEFAULT_SOCK_PATH resolves to a non-endpoint; the
+# two regression suites are then selected by PATH (no pytest marker, no
+# pyproject.toml edit -> no collision with the ci.yml work). SEPARATE file from
+# ci.yml on purpose. T-14-18: contents:read only, no secrets, read-only test run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression-no-ipc:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Assert NO dwm-ipc endpoint is present (REG-01 precondition)
+        run: |
+          # T-14-19: a real dwm.sock would mask the gated-off proof. Fail loudly if
+          # one somehow exists on the runner; the suite must run with no endpoint.
+          if [ -S /tmp/dwm.sock ]; then
+            echo "FATAL: /tmp/dwm.sock exists; the no-dwm-ipc regression proof is invalid." >&2
+            exit 1
+          fi
+          test ! -S /tmp/dwm.sock
+      - name: Run the anti-regression suites with an empty DWM_SOCKET
+        env:
+          # Empty -> dwmipc.DEFAULT_SOCK_PATH resolves to a non-endpoint path.
+          DWM_SOCKET: ""
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install -e ".[test]"
+          # Path-selected (no marker): prove the gated-off / RPi4-style path stays
+          # green WITHOUT dwm-ipc present (REG-01).
+          pytest -v tests/test_regression_no_ipc.py tests/test_regression_rpi4_core.py

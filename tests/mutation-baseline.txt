@@ -1,0 +1,715 @@
+# TEST-06 mutation-testing SURVIVOR BASELINE
+# ------------------------------------------
+# Tool:        mutmut 3.6  (cosmic-ray 8.4.6 is the drafted fallback in cosmic-ray.toml)
+# Recorded:    from a CLEAN, NON-EDITABLE venv (pip install "python-xlib>=0.31" pytest
+#              "mutmut==3.6.*"; pip uninstall -y xrandrw; NO `pip install -e`) via
+#              ci/mutation_sanity_kill.sh's environment, AFTER the sanity-kill was GREEN
+#              (killed=35 on parse_header -> the false-0-kill B1 trap is defeated).
+# Scope:       the three window-mgmt modules only (dwmipc, windows, relocate) per [tool.mutmut].
+#
+# First-pass numbers (mock-heavy suite, ~330 monkeypatches -> RESEARCH's expected 55-75% band):
+#   killed=1109  survived=627  no_tests=201  total=1937   (kill rate 63.9% of run mutants)
+#
+# THE GATE (see .github/workflows/mutation.yml):
+#   * HARD FAIL if the runner reports killed < 1 (a 0-kill result is the B1 trap, never a pass).
+#   * RATCHET: FAIL if survivors EXCEED the ceiling below. It only ever moves DOWN -- each
+#     hardening pass that kills survivors should LOWER SURVIVOR_BASELINE here.
+#   * The live-X / socket / EVENT-loop seams (transport, real recv, os.getuid checks) are
+#     PERMANENT baseline survivors -- they are L1's job (the real-dwm E2E harness, plan 14-01),
+#     not the pure-unit mutation gate's. That is why the ceiling is a survivor count, not 0.
+#
+# Machine-readable ceiling consumed by the nightly ratchet gate:
+SURVIVOR_BASELINE=627
+#
+# Per-module survivor split (audit aid): dwmipc=173  relocate=265  windows=189
+#
+# ==========================================================================================
+# RE-MEASUREMENT 2026-07-19 (14-08 replug-bounce fix + UX-01/02/03, commits 76f39ae..2a20f8b)
+# ==========================================================================================
+# MEASURED, from a clean NON-editable venv via ci/mutation_sanity_kill.sh's environment,
+# AFTER the sanity-kill was GREEN (killed=35 on parse_header -> B1 false-0-kill trap defeated).
+# Numbers read from mutants/mutmut-cicd-stats.json, NOT hand-computed:
+#
+#            total   run   killed  survived  no_tests   kill rate
+#   14-04:    1937   1736    1109       627       201      63.9%
+#   14-09:    2266   2067    1311       756       199      63.4%
+#   delta:    +329   +331    +202      +129        -2      -0.5pp
+#
+#   Per-module survivors: dwmipc=184 (+11)  relocate=370 (+105)  windows=202 (+13)
+#
+# THE CEILING IS DEPRECATED AS MEASURED -- AND IS DELIBERATELY *NOT* RAISED HERE.
+#
+# The ratchet did NOT move down, because the scoped modules GREW during the same phase:
+# `git diff 6a087a0..HEAD -- src/xrandrw/{dwmipc,windows,relocate}.py` = +484/-65 lines
+# (relocate.py +416 alone: bounce hold-down, steady-state focus snapshot/restore, IPC-rejection
+# surfacing). More code spawns more mutants; +331 runnable mutants appeared and +129 of them
+# survive.
+#
+# THIS IS NOT A TEST-STRENGTH REGRESSION, and the evidence is the RATE, not the count:
+#   * overall kill rate is FLAT within noise: 63.9% -> 63.4%
+#   * the NEW code's own kill rate is 202/331 = 61.0%, i.e. comparable to the incumbent 63.9%
+#   * tests grew +2429 lines over the same range
+# A genuine regression would show previously-killed mutants surviving at a FLAT mutant total.
+# That is not what happened.
+#
+# WHY 627 IS LEFT IN PLACE ANYWAY (this is the important part -- do not "fix" it casually):
+# Raising a quality gate's ceiling is a POLICY change, not a measurement. Plan 14-09 states the
+# invariant flatly ("it only ever moves DOWN") and its threat register (T-14-09-01) names a
+# silently-raised ceiling as the thing to prevent. So the ceiling stays at 627, the nightly gate
+# reports RED (756 > 627), and the RED IS CORRECT AND INFORMATIVE: it is the ratchet doing its
+# job, telling a human that a count-based gate has been outgrown by its own codebase.
+#
+# THE DECISION THIS NEEDS FROM A HUMAN (one of):
+#   (a) RE-BASELINE to the measured 756 and record this block as the justification -- restores a
+#       working gate, but concedes the count ratchet must be re-based whenever code grows; or
+#   (b) SWITCH THE GATE to a kill-RATE floor (e.g. fail under 60%), which is scale-invariant and
+#       is the technically correct instrument for a growing codebase. Requires editing
+#       .github/workflows/mutation.yml:69, which plan 14-09 placed out of scope; or
+#   (c) KILL ~129 new survivors with new tests, then set the ceiling to whatever that measures.
+#       Plan 14-09 adds no tests, so this was not available here.
+# Until then the surviving-mutant BODY below is the 14-04 (627) set, deliberately left in sync
+# with the 627 ceiling so this file stays internally consistent. Regenerate BOTH together.
+# ==========================================================================================
+#
+# Full surviving-mutant set (sorted) follows so a diff shows exactly which mutant regressed
+# if the count ever rises. Regenerate with: bash ci/mutation_sanity_kill.sh's env + `mutmut run`
+# then `mutmut results | grep ': survived$'`.
+#
+# ^^ USE THE ANCHORED PATTERN ABOVE -- the `$` end-of-line ANCHOR is load-bearing, not decoration.
+#    ONLY the anchored form is authoritative:
+#        anchored    `grep -c ': survived$'`  == SURVIVOR_BASELINE   <- correct, verify with this
+#        unanchored  `grep -c ': survived'`   >  SURVIVOR_BASELINE   <- ALWAYS an over-count
+#    Every real survivor line ENDS in ": survived", so the anchor loses nothing. But the header
+#    comments that QUOTE the pattern (including these lines) end in prose, so they match the
+#    unanchored form and not the anchored one. The unanchored over-count therefore GROWS as this
+#    header is edited -- do not "fix" it by chasing a hardcoded number.
+#    Historical note: this was found as a 628-vs-627 off-by-one against a single quoting comment.
+#    The quoted examples were always correct; only the unanchored grep was wrong.
+# ------------------------------------------
+xrandrw.dwmipc.x_available__mutmut_12: survived
+xrandrw.dwmipc.x_available__mutmut_14: survived
+xrandrw.dwmipc.x_available__mutmut_15: survived
+xrandrw.dwmipc.x_available__mutmut_20: survived
+xrandrw.dwmipc.x_available__mutmut_21: survived
+xrandrw.dwmipc.x_available__mutmut_22: survived
+xrandrw.dwmipc.x_available__mutmut_23: survived
+xrandrw.dwmipc.x_available__mutmut_24: survived
+xrandrw.dwmipc.x_available__mutmut_25: survived
+xrandrw.dwmipc.x_available__mutmut_26: survived
+xrandrw.dwmipc.x_available__mutmut_7: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_11: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_12: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_17: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_18: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_19: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_20: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_21: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_22: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_23: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_24: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_25: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_4: survived
+xrandrw.dwmipc.x_decode_reply__mutmut_9: survived
+xrandrw.dwmipc.x__env_float__mutmut_15: survived
+xrandrw.dwmipc.x__env_float__mutmut_17: survived
+xrandrw.dwmipc.x__env_float__mutmut_18: survived
+xrandrw.dwmipc.x__env_float__mutmut_19: survived
+xrandrw.dwmipc.x__env_float__mutmut_24: survived
+xrandrw.dwmipc.x__env_float__mutmut_25: survived
+xrandrw.dwmipc.x__env_float__mutmut_26: survived
+xrandrw.dwmipc.x__env_float__mutmut_27: survived
+xrandrw.dwmipc.x__env_float__mutmut_28: survived
+xrandrw.dwmipc.x__env_float__mutmut_29: survived
+xrandrw.dwmipc.x__env_float__mutmut_30: survived
+xrandrw.dwmipc.x__env_float__mutmut_8: survived
+xrandrw.dwmipc.x__env_int__mutmut_16: survived
+xrandrw.dwmipc.x__env_int__mutmut_18: survived
+xrandrw.dwmipc.x__env_int__mutmut_19: survived
+xrandrw.dwmipc.x__env_int__mutmut_20: survived
+xrandrw.dwmipc.x__env_int__mutmut_25: survived
+xrandrw.dwmipc.x__env_int__mutmut_26: survived
+xrandrw.dwmipc.x__env_int__mutmut_27: survived
+xrandrw.dwmipc.x__env_int__mutmut_28: survived
+xrandrw.dwmipc.x__env_int__mutmut_29: survived
+xrandrw.dwmipc.x__env_int__mutmut_30: survived
+xrandrw.dwmipc.x__env_int__mutmut_31: survived
+xrandrw.dwmipc.x__env_int__mutmut_8: survived
+xrandrw.dwmipc.x_get_dwm_client__mutmut_16: survived
+xrandrw.dwmipc.x_get_dwm_client__mutmut_3: survived
+xrandrw.dwmipc.x_get_monitors__mutmut_7: survived
+xrandrw.dwmipc.x_parse_header__mutmut_12: survived
+xrandrw.dwmipc.x_parse_header__mutmut_13: survived
+xrandrw.dwmipc.x_parse_header__mutmut_14: survived
+xrandrw.dwmipc.x_parse_header__mutmut_15: survived
+xrandrw.dwmipc.x_parse_header__mutmut_16: survived
+xrandrw.dwmipc.x_parse_header__mutmut_17: survived
+xrandrw.dwmipc.x_parse_header__mutmut_18: survived
+xrandrw.dwmipc.x_parse_header__mutmut_19: survived
+xrandrw.dwmipc.x_parse_header__mutmut_20: survived
+xrandrw.dwmipc.x_parse_header__mutmut_26: survived
+xrandrw.dwmipc.x_parse_header__mutmut_28: survived
+xrandrw.dwmipc.x_parse_header__mutmut_33: survived
+xrandrw.dwmipc.x_parse_header__mutmut_34: survived
+xrandrw.dwmipc.x_parse_header__mutmut_35: survived
+xrandrw.dwmipc.x_parse_header__mutmut_36: survived
+xrandrw.dwmipc.x_parse_header__mutmut_37: survived
+xrandrw.dwmipc.x_parse_header__mutmut_38: survived
+xrandrw.dwmipc.x_parse_header__mutmut_39: survived
+xrandrw.dwmipc.x_parse_header__mutmut_40: survived
+xrandrw.dwmipc.x_parse_header__mutmut_45: survived
+xrandrw.dwmipc.x_parse_header__mutmut_47: survived
+xrandrw.dwmipc.x_parse_header__mutmut_4: survived
+xrandrw.dwmipc.x_parse_header__mutmut_52: survived
+xrandrw.dwmipc.x_parse_header__mutmut_53: survived
+xrandrw.dwmipc.x_parse_header__mutmut_54: survived
+xrandrw.dwmipc.x_parse_header__mutmut_55: survived
+xrandrw.dwmipc.x_parse_header__mutmut_56: survived
+xrandrw.dwmipc.x_parse_header__mutmut_57: survived
+xrandrw.dwmipc.x_parse_header__mutmut_58: survived
+xrandrw.dwmipc.x_parse_header__mutmut_59: survived
+xrandrw.dwmipc.x_parse_header__mutmut_60: survived
+xrandrw.dwmipc.x_parse_header__mutmut_61: survived
+xrandrw.dwmipc.x_parse_header__mutmut_65: survived
+xrandrw.dwmipc.x_parse_header__mutmut_67: survived
+xrandrw.dwmipc.x_parse_header__mutmut_68: survived
+xrandrw.dwmipc.x_parse_header__mutmut_69: survived
+xrandrw.dwmipc.x_parse_header__mutmut_6: survived
+xrandrw.dwmipc.x_parse_header__mutmut_74: survived
+xrandrw.dwmipc.x_parse_header__mutmut_75: survived
+xrandrw.dwmipc.x_parse_header__mutmut_76: survived
+xrandrw.dwmipc.x_parse_header__mutmut_77: survived
+xrandrw.dwmipc.x_parse_header__mutmut_78: survived
+xrandrw.dwmipc.x_parse_header__mutmut_79: survived
+xrandrw.dwmipc.x_parse_header__mutmut_7: survived
+xrandrw.dwmipc.x_parse_header__mutmut_80: survived
+xrandrw.dwmipc.x_parse_header__mutmut_81: survived
+xrandrw.dwmipc.x_parse_header__mutmut_82: survived
+xrandrw.dwmipc.x_parse_header__mutmut_83: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_10: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_11: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_16: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_17: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_18: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_19: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_20: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_21: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_22: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_23: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_24: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_28: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_30: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_31: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_32: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_33: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_38: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_39: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_3: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_40: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_41: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_42: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_43: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_44: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_45: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_46: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_47: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_48: survived
+xrandrw.dwmipc.x__preflight_socket__mutmut_8: survived
+xrandrw.dwmipc.x__recvall__mutmut_10: survived
+xrandrw.dwmipc.x__recvall__mutmut_11: survived
+xrandrw.dwmipc.x__recvall__mutmut_15: survived
+xrandrw.dwmipc.x__recvall__mutmut_16: survived
+xrandrw.dwmipc.x__recvall__mutmut_17: survived
+xrandrw.dwmipc.x__recvall__mutmut_18: survived
+xrandrw.dwmipc.x__recvall__mutmut_19: survived
+xrandrw.dwmipc.x__recvall__mutmut_21: survived
+xrandrw.dwmipc.x__recvall__mutmut_22: survived
+xrandrw.dwmipc.x__recvall__mutmut_23: survived
+xrandrw.dwmipc.x__recvall__mutmut_24: survived
+xrandrw.dwmipc.x__recvall__mutmut_7: survived
+xrandrw.dwmipc.x__recvall__mutmut_9: survived
+xrandrw.dwmipc.x_request__mutmut_10: survived
+xrandrw.dwmipc.x_request__mutmut_11: survived
+xrandrw.dwmipc.x_request__mutmut_12: survived
+xrandrw.dwmipc.x_request__mutmut_14: survived
+xrandrw.dwmipc.x_request__mutmut_1: survived
+xrandrw.dwmipc.x_request__mutmut_27: survived
+xrandrw.dwmipc.x_request__mutmut_30: survived
+xrandrw.dwmipc.x_request__mutmut_34: survived
+xrandrw.dwmipc.x_request__mutmut_37: survived
+xrandrw.dwmipc.x_request__mutmut_38: survived
+xrandrw.dwmipc.x_request__mutmut_39: survived
+xrandrw.dwmipc.x_request__mutmut_40: survived
+xrandrw.dwmipc.x_request__mutmut_41: survived
+xrandrw.dwmipc.x_request__mutmut_42: survived
+xrandrw.dwmipc.x_request__mutmut_43: survived
+xrandrw.dwmipc.x__require_dict__mutmut_2: survived
+xrandrw.dwmipc.x__require_dict__mutmut_3: survived
+xrandrw.dwmipc.x__require_dict__mutmut_5: survived
+xrandrw.dwmipc.x__require_list_of_dicts__mutmut_10: survived
+xrandrw.dwmipc.x__require_list_of_dicts__mutmut_4: survived
+xrandrw.dwmipc.x__require_list_of_dicts__mutmut_5: survived
+xrandrw.dwmipc.x__require_list_of_dicts__mutmut_7: survived
+xrandrw.dwmipc.x__require_list_of_dicts__mutmut_8: survived
+xrandrw.dwmipc.x_run_command__mutmut_18: survived
+xrandrw.dwmipc.x_run_command__mutmut_3: survived
+xrandrw.dwmipc.x_subscribe__mutmut_11: survived
+xrandrw.dwmipc.x_subscribe__mutmut_18: survived
+xrandrw.dwmipc.x_subscribe__mutmut_19: survived
+xrandrw.dwmipc.x_subscribe__mutmut_2: survived
+xrandrw.dwmipc.x_subscribe__mutmut_7: survived
+xrandrw.dwmipc.x_subscribe__mutmut_8: survived
+xrandrw.dwmipc.x_subscribe__mutmut_9: survived
+xrandrw.relocate.x_monitor_origin__mutmut_18: survived
+xrandrw.relocate.x_plan_restore__mutmut_3: survived
+xrandrw.relocate.x__selected_confirmed__mutmut_12: survived
+xrandrw.relocate.x__selected_confirmed__mutmut_13: survived
+xrandrw.relocate.x__selected_confirmed__mutmut_14: survived
+xrandrw.relocate.x_tagmon_direction__mutmut_8: survived
+xrandrw.relocate.x_to_monitor_relative_geometry__mutmut_11: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_1: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_31: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_32: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_37: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_38: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_41: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_42: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_43: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_44: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_4: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_8: survived
+xrandrw.relocate.xǁRelocationControlǁconfigure_geometry__mutmut_9: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_13: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_14: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_1: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_23: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_24: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_25: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_26: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_28: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_30: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_31: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_37: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_38: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_43: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_44: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_47: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_48: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_49: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_50: survived
+xrandrw.relocate.xǁRelocationControlǁfocus__mutmut_9: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_enabled__mutmut_2: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_enabled__mutmut_3: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_enabled__mutmut_4: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_enabled__mutmut_5: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_17: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_22: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_25: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_26: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_7: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_focus_and_confirm__mutmut_9: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ__init____mutmut_1: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ__init____mutmut_2: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_13: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_16: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_17: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_23: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_26: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_28: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_29: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_34: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_35: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_36: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_37: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_38: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_39: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_3: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_59: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_60: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁon_settled__mutmut_8: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_14: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_15: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_16: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_17: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_19: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_6: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_8: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_record_displaced__mutmut_9: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_100: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_101: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_102: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_103: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_104: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_105: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_106: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_116: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_117: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_118: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_119: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_120: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_121: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_122: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_123: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_124: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_125: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_126: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_127: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_128: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_129: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_130: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_131: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_132: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_133: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_134: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_135: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_136: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_137: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_138: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_145: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_156: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_157: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_158: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_15: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_163: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_164: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_165: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_168: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_169: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_16: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_170: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_174: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_176: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_177: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_17: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_182: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_183: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_184: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_185: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_186: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_187: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_19: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_20: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_21: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_22: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_23: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_24: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_25: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_26: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_27: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_28: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_29: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_30: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_31: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_32: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_39: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_5: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_67: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_76: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_77: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_78: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_79: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_80: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_81: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_82: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_83: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_84: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_85: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_86: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_87: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_88: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_89: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_90: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_91: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_93: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_94: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_95: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_96: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_97: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_98: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_99: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_one__mutmut_9: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_102: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_103: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_104: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_105: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_106: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_107: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_108: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_110: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_111: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_112: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_13: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_21: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_22: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_23: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_27: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_30: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_38: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_3: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_40: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_41: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_46: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_47: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_48: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_49: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_50: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_51: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_52: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_54: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_66: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_68: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_69: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_74: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_75: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_76: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_77: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_78: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_79: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_80: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_81: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_82: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_83: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_84: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_88: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_89: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_8: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_90: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_93: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_95: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_96: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_restore_returned__mutmut_97: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_12: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_13: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_23: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_26: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_27: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_28: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_safe_capture__mutmut_7: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_source_monitor_has_other_client__mutmut_17: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_source_monitor_has_other_client__mutmut_21: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_source_monitor_has_other_client__mutmut_5: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_source_monitor_has_other_client__mutmut_6: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_19: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_24: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_25: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_28: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_29: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_5: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_sweep_displaced__mutmut_8: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_11: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_12: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_13: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_18: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_19: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_20: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_23: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_24: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_25: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_26: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_27: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_28: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_30: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_40: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_43: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_49: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_4: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_57: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_58: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_63: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_64: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_67: survived
+xrandrw.relocate.xǁRelocationCoordinatorǁ_tagmon_to_target__mutmut_68: survived
+xrandrw.windows.x_build_record__mutmut_39: survived
+xrandrw.windows.x_capture_windows__mutmut_102: survived
+xrandrw.windows.x_capture_windows__mutmut_105: survived
+xrandrw.windows.x_capture_windows__mutmut_106: survived
+xrandrw.windows.x_capture_windows__mutmut_113: survived
+xrandrw.windows.x_capture_windows__mutmut_118: survived
+xrandrw.windows.x_capture_windows__mutmut_120: survived
+xrandrw.windows.x_capture_windows__mutmut_121: survived
+xrandrw.windows.x_capture_windows__mutmut_122: survived
+xrandrw.windows.x_capture_windows__mutmut_123: survived
+xrandrw.windows.x_capture_windows__mutmut_124: survived
+xrandrw.windows.x_capture_windows__mutmut_125: survived
+xrandrw.windows.x_capture_windows__mutmut_126: survived
+xrandrw.windows.x_capture_windows__mutmut_127: survived
+xrandrw.windows.x_capture_windows__mutmut_128: survived
+xrandrw.windows.x_capture_windows__mutmut_129: survived
+xrandrw.windows.x_capture_windows__mutmut_130: survived
+xrandrw.windows.x_capture_windows__mutmut_131: survived
+xrandrw.windows.x_capture_windows__mutmut_132: survived
+xrandrw.windows.x_capture_windows__mutmut_133: survived
+xrandrw.windows.x_capture_windows__mutmut_134: survived
+xrandrw.windows.x_capture_windows__mutmut_142: survived
+xrandrw.windows.x_capture_windows__mutmut_143: survived
+xrandrw.windows.x_capture_windows__mutmut_144: survived
+xrandrw.windows.x_capture_windows__mutmut_145: survived
+xrandrw.windows.x_capture_windows__mutmut_146: survived
+xrandrw.windows.x_capture_windows__mutmut_147: survived
+xrandrw.windows.x_capture_windows__mutmut_148: survived
+xrandrw.windows.x_capture_windows__mutmut_149: survived
+xrandrw.windows.x_capture_windows__mutmut_150: survived
+xrandrw.windows.x_capture_windows__mutmut_151: survived
+xrandrw.windows.x_capture_windows__mutmut_152: survived
+xrandrw.windows.x_capture_windows__mutmut_153: survived
+xrandrw.windows.x_capture_windows__mutmut_154: survived
+xrandrw.windows.x_capture_windows__mutmut_155: survived
+xrandrw.windows.x_capture_windows__mutmut_156: survived
+xrandrw.windows.x_capture_windows__mutmut_157: survived
+xrandrw.windows.x_capture_windows__mutmut_158: survived
+xrandrw.windows.x_capture_windows__mutmut_159: survived
+xrandrw.windows.x_capture_windows__mutmut_171: survived
+xrandrw.windows.x_capture_windows__mutmut_172: survived
+xrandrw.windows.x_capture_windows__mutmut_177: survived
+xrandrw.windows.x_capture_windows__mutmut_178: survived
+xrandrw.windows.x_capture_windows__mutmut_181: survived
+xrandrw.windows.x_capture_windows__mutmut_182: survived
+xrandrw.windows.x_capture_windows__mutmut_183: survived
+xrandrw.windows.x_capture_windows__mutmut_184: survived
+xrandrw.windows.x_capture_windows__mutmut_186: survived
+xrandrw.windows.x_capture_windows__mutmut_1: survived
+xrandrw.windows.x_capture_windows__mutmut_202: survived
+xrandrw.windows.x_capture_windows__mutmut_204: survived
+xrandrw.windows.x_capture_windows__mutmut_205: survived
+xrandrw.windows.x_capture_windows__mutmut_206: survived
+xrandrw.windows.x_capture_windows__mutmut_207: survived
+xrandrw.windows.x_capture_windows__mutmut_20: survived
+xrandrw.windows.x_capture_windows__mutmut_212: survived
+xrandrw.windows.x_capture_windows__mutmut_213: survived
+xrandrw.windows.x_capture_windows__mutmut_214: survived
+xrandrw.windows.x_capture_windows__mutmut_215: survived
+xrandrw.windows.x_capture_windows__mutmut_216: survived
+xrandrw.windows.x_capture_windows__mutmut_217: survived
+xrandrw.windows.x_capture_windows__mutmut_218: survived
+xrandrw.windows.x_capture_windows__mutmut_219: survived
+xrandrw.windows.x_capture_windows__mutmut_220: survived
+xrandrw.windows.x_capture_windows__mutmut_225: survived
+xrandrw.windows.x_capture_windows__mutmut_226: survived
+xrandrw.windows.x_capture_windows__mutmut_231: survived
+xrandrw.windows.x_capture_windows__mutmut_232: survived
+xrandrw.windows.x_capture_windows__mutmut_235: survived
+xrandrw.windows.x_capture_windows__mutmut_236: survived
+xrandrw.windows.x_capture_windows__mutmut_237: survived
+xrandrw.windows.x_capture_windows__mutmut_238: survived
+xrandrw.windows.x_capture_windows__mutmut_25: survived
+xrandrw.windows.x_capture_windows__mutmut_28: survived
+xrandrw.windows.x_capture_windows__mutmut_29: survived
+xrandrw.windows.x_capture_windows__mutmut_2: survived
+xrandrw.windows.x_capture_windows__mutmut_30: survived
+xrandrw.windows.x_capture_windows__mutmut_32: survived
+xrandrw.windows.x_capture_windows__mutmut_33: survived
+xrandrw.windows.x_capture_windows__mutmut_34: survived
+xrandrw.windows.x_capture_windows__mutmut_35: survived
+xrandrw.windows.x_capture_windows__mutmut_36: survived
+xrandrw.windows.x_capture_windows__mutmut_41: survived
+xrandrw.windows.x_capture_windows__mutmut_46: survived
+xrandrw.windows.x_capture_windows__mutmut_49: survived
+xrandrw.windows.x_capture_windows__mutmut_4: survived
+xrandrw.windows.x_capture_windows__mutmut_50: survived
+xrandrw.windows.x_capture_windows__mutmut_51: survived
+xrandrw.windows.x_capture_windows__mutmut_55: survived
+xrandrw.windows.x_capture_windows__mutmut_58: survived
+xrandrw.windows.x_capture_windows__mutmut_60: survived
+xrandrw.windows.x_capture_windows__mutmut_61: survived
+xrandrw.windows.x_capture_windows__mutmut_62: survived
+xrandrw.windows.x_capture_windows__mutmut_63: survived
+xrandrw.windows.x_capture_windows__mutmut_69: survived
+xrandrw.windows.x_capture_windows__mutmut_6: survived
+xrandrw.windows.x_capture_windows__mutmut_75: survived
+xrandrw.windows.x_capture_windows__mutmut_80: survived
+xrandrw.windows.x_capture_windows__mutmut_83: survived
+xrandrw.windows.x_capture_windows__mutmut_84: survived
+xrandrw.windows.x_capture_windows__mutmut_8: survived
+xrandrw.windows.x_capture_windows__mutmut_91: survived
+xrandrw.windows.x_capture_windows__mutmut_97: survived
+xrandrw.windows.x__client_geometry__mutmut_16: survived
+xrandrw.windows.x__client_geometry__mutmut_17: survived
+xrandrw.windows.x__client_geometry__mutmut_18: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_2: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_41: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_42: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_43: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_48: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_49: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_50: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_53: survived
+xrandrw.windows.x_match_dwm_monitor_to_output__mutmut_54: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_10: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_11: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_12: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_7: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_8: survived
+xrandrw.windows.x_parse_starttime_from_stat__mutmut_9: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_14: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_1: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_22: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_23: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_24: survived
+xrandrw.windows.x_read_proc_cmdline__mutmut_2: survived
+xrandrw.windows.x_read_proc_comm__mutmut_1: survived
+xrandrw.windows.x_read_proc_comm__mutmut_2: survived
+xrandrw.windows.x_read_proc_comm__mutmut_4: survived
+xrandrw.windows.x_read_proc_comm__mutmut_6: survived
+xrandrw.windows.x_read_proc_identity__mutmut_13: survived
+xrandrw.windows.x_read_proc_identity__mutmut_14: survived
+xrandrw.windows.x_read_proc_identity__mutmut_15: survived
+xrandrw.windows.x_read_proc_identity__mutmut_1: survived
+xrandrw.windows.x_read_proc_identity__mutmut_25: survived
+xrandrw.windows.x_read_proc_identity__mutmut_26: survived
+xrandrw.windows.x_read_proc_identity__mutmut_27: survived
+xrandrw.windows.x_read_proc_identity__mutmut_2: survived
+xrandrw.windows.x_read_proc_identity__mutmut_33: survived
+xrandrw.windows.x_read_proc_identity__mutmut_34: survived
+xrandrw.windows.x_read_proc_identity__mutmut_39: survived
+xrandrw.windows.x_read_proc_identity__mutmut_40: survived
+xrandrw.windows.x_read_proc_identity__mutmut_41: survived
+xrandrw.windows.x_read_proc_identity__mutmut_44: survived
+xrandrw.windows.x_read_proc_identity__mutmut_45: survived
+xrandrw.windows.x_read_proc_identity__mutmut_46: survived
+xrandrw.windows.x_resolve_pid__mutmut_16: survived
+xrandrw.windows.x_resolve_pid__mutmut_17: survived
+xrandrw.windows.x_resolve_pid__mutmut_18: survived
+xrandrw.windows.x_resolve_pid__mutmut_1: survived
+xrandrw.windows.x_resolve_pid__mutmut_23: survived
+xrandrw.windows.x_resolve_pid__mutmut_24: survived
+xrandrw.windows.x_resolve_pid__mutmut_25: survived
+xrandrw.windows.x_resolve_pid__mutmut_28: survived
+xrandrw.windows.x_resolve_pid__mutmut_29: survived
+xrandrw.windows.x_resolve_pid__mutmut_2: survived
+xrandrw.windows.x_resolve_pid__mutmut_34: survived
+xrandrw.windows.x_resolve_pid__mutmut_39: survived
+xrandrw.windows.x_resolve_pid__mutmut_42: survived
+xrandrw.windows.x_resolve_pid__mutmut_48: survived
+xrandrw.windows.x_resolve_pid__mutmut_49: survived
+xrandrw.windows.x_resolve_pid__mutmut_4: survived
+xrandrw.windows.x_resolve_pid__mutmut_50: survived
+xrandrw.windows.x_resolve_pid__mutmut_55: survived
+xrandrw.windows.x_resolve_pid__mutmut_56: survived
+xrandrw.windows.x_resolve_pid__mutmut_57: survived
+xrandrw.windows.x_resolve_pid__mutmut_60: survived
+xrandrw.windows.x_resolve_pid__mutmut_61: survived
+xrandrw.windows.x_resolve_pid__mutmut_62: survived
+xrandrw.windows.x_resolve_pid__mutmut_63: survived
+xrandrw.windows.x_resolve_pid__mutmut_64: survived
+xrandrw.windows.x_resolve_pid__mutmut_65: survived
+xrandrw.windows.x_resolve_pid__mutmut_66: survived
+xrandrw.windows.x_resolve_pid__mutmut_67: survived
+xrandrw.windows.x_resolve_pid__mutmut_68: survived
+xrandrw.windows.x_resolve_pid__mutmut_69: survived
+xrandrw.windows.x_resolve_pid__mutmut_70: survived
+xrandrw.windows.x_resolve_pid__mutmut_71: survived
+xrandrw.windows.x_resolve_pid__mutmut_72: survived
+xrandrw.windows.x_resolve_pid__mutmut_73: survived
+xrandrw.windows.x_resolve_pid__mutmut_74: survived
+xrandrw.windows.x_resolve_pid__mutmut_75: survived
+xrandrw.windows.x_resolve_pid__mutmut_76: survived
+xrandrw.windows.x_resolve_pid__mutmut_77: survived
+xrandrw.windows.x_resolve_pid__mutmut_78: survived
+xrandrw.windows.x_resolve_pid__mutmut_79: survived
+xrandrw.windows.x_resolve_pid__mutmut_80: survived
+xrandrw.windows.x_resolve_pid__mutmut_8: survived

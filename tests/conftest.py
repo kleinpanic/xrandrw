@@ -3,6 +3,7 @@ from typing import Callable
 
 import pytest
 
+from xrandrw import dwmipc
 from xrandrw.xrandr import Output
 
 
@@ -15,14 +16,43 @@ def isolate_state(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
 
 
+@pytest.fixture(autouse=True)
+def block_live_dwm(request, monkeypatch, tmp_path):
+    # Phase-14 test-isolation gap (P0). A non-fully-mocked unit test must NEVER be
+    # able to resolve dwmipc.DEFAULT_SOCK_PATH to the real /tmp/dwm.sock or DISPLAY
+    # to :0 and reach the developer's live dwm — a mutating tagmon SIGSEGV-crashed
+    # it four times in one day. dwmipc freezes DEFAULT_SOCK_PATH at import
+    # (dwmipc.py:57), so an env-only guard is too late for that module attribute:
+    # override BOTH the attribute (every production call site — cli.py, windows.py,
+    # relocate.py — re-reads it at call time) AND $DWM_SOCKET, and point
+    # DISPLAY/XAUTHORITY at dead throwaways so any stray Xlib/socket connect fails
+    # closed instead of landing on :0.
+    #
+    # functional-marked tests stand up their own session-scoped private socket +
+    # display (tests/functional/conftest.py) and assert socket != /tmp/dwm.sock;
+    # no-op there so this per-function guard never clobbers that session harness.
+    if request.node.get_closest_marker("functional") is not None:
+        return
+    dead_sock = str(tmp_path / "no-dwm.sock")
+    monkeypatch.setattr(dwmipc, "DEFAULT_SOCK_PATH", dead_sock)
+    monkeypatch.setenv("DWM_SOCKET", dead_sock)
+    monkeypatch.setenv("DISPLAY", ":99991")
+    monkeypatch.setenv("XAUTHORITY", str(tmp_path / "no.Xauthority"))
+
+
 @pytest.fixture
 def output_factory() -> Callable[..., Output]:
-    def make(name, connected=True, primary=False, current_mode=None, modes=None, edid_sha1=None):
+    # `position` (added 14-08) defaults to None so every existing call site is unaffected;
+    # without it no shared-fixture test could express a CRTC-lit output (the state the
+    # replug-bounce defect turns on).
+    def make(name, connected=True, primary=False, current_mode=None, modes=None, edid_sha1=None,
+             position=None):
         return Output(
             name=name,
             connected=connected,
             primary=primary,
             current_mode=current_mode,
+            position=position,
             modes=modes if modes is not None else [],
             edid_sha1=edid_sha1,
         )

@@ -1,0 +1,29 @@
+L3 LIVE 2-MONITOR HDMI VERIFY — PASS
+=====================================
+date:        2026-07-19 20:33 EDT
+hardware:    Dell laptop, eDP-1 (1920x1200, primary) + HDMI-1 (1600x900, right-of)
+wm:          dwm 6.5 + dwm-ipc patch, live /tmp/dwm.sock
+commit:      2a20f8b
+operator:    kleinpanic (physical unplug/replug of HDMI cable)
+daemon:      xrandrw --watch, WINDOW_MANAGEMENT=1, LOG_LEVEL=debug
+
+VERIFIED (full true chain, real hardware, no mocks):
+  physical unplug -> RandR event -> watch_loop -> apply_once -> on_settled
+    -> recorded displaced x3 (output=HDMI-1)
+  physical replug -> apply_once -> on_settled
+    -> restored displaced x3 (output=HDMI-1), dropped=3 skipped=0
+  focus: relocate_focus_restored xid=35651589 (the operator's pre-unplug window)
+
+RESULT: all 3 windows returned to HDMI-1; exactly ONE displace cycle and ONE
+restore cycle (no bounce-induced double movement); operator focus preserved.
+Operator verdict: "it works perfectly".
+
+EVIDENCE (repo-local, .planning/ is gitignored):
+  .planning/debug/evidence/livetest-UX-PASS-2026-07-19-2033.log   (this run)
+  .planning/debug/evidence/livetest-PASS-2026-07-19-1929.log      (P1 functional pass)
+  .planning/debug/evidence/newdaemon2.log                          (the original 04:21 failure)
+
+HISTORY: two earlier live attempts FAILED (2026-07-19 ~04:21) with windows
+stranded on eDP-1. Root cause was three necessary+jointly-sufficient links:
+matcher connected-preferring tie-break, scrub_stale moved onto read #2, and
+CRTC-liveness edge detection. See .planning/debug/resolved/relocate-replug-bounce.md

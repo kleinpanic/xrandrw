@@ -1,0 +1,29 @@
+# TEST-06 mutation-testing FALLBACK config (cosmic-ray 8.4.6).
+#
+# NOT the active tool. mutmut 3.6 is the selected runner (its sanity-kill goes green in a
+# NON-editable venv -- see ci/mutation_sanity_kill.sh, which reports killed>=1). This file is
+# the drafted fallback used ONLY if the mutmut sanity-kill ever STOPS killing in the time-box
+# (RESEARCH-mutation Pitfall 1). cosmic-ray mutates the source file IN PLACE per mutant instead
+# of copying to a `mutants/src` tree, so the editable-`.pth`/`pythonpath` shadowing that causes
+# mutmut's false-0-kill cannot occur -- making it a robust escape hatch.
+#
+# Switch procedure (operator, if mutmut sanity-kill fails):
+#   pip install "cosmic-ray==8.4.6"
+#   cosmic-ray init cosmic-ray.toml session.sqlite
+#   cosmic-ray exec cosmic-ray.toml session.sqlite
+#   cr-report session.sqlite            # human-readable survivor report
+#   cr-rate session.sqlite --fail-over 25   # ratchet gate: fail if survival rate > 25%
+#
+# Scoped to the dwmipc SEC-01 boundary (the sanity target); broaden module-path to the
+# windows/relocate modules once the fallback is exercised.
+
+[cosmic-ray]
+module-path = "src/xrandrw/dwmipc.py"
+timeout = 30.0
+excluded-modules = []
+# Clear the pytest `pythonpath=["src"]` override and select the boundary tests, mirroring the
+# mutmut config so both tools exercise the same assertions.
+test-command = "python -m pytest -x -o pythonpath=src tests/test_dwmipc_parse.py tests/test_dwmipc_fuzz.py tests/test_mutation_kills.py"
+
+[cosmic-ray.distributor]
+name = "local"

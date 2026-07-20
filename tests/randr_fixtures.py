@@ -5,7 +5,11 @@ from Xlib.ext import randr
 
 # Plain structs mirroring the python-xlib RandR reply objects the pure mapper reads.
 OutputInfo = namedtuple("OutputInfo", "oid name connection crtc modes num_preferred")
-CrtcInfo = namedtuple("CrtcInfo", "width height mode")
+# x/y are the CRTC origin exposed by the live GetCrtcInfo reply; added (Phase 9,
+# WM-04) so Output.position can be threaded through and matched against dwm
+# monitor_geometry. Existing test_native_read assertions read only
+# width/height/mode, so this field is purely additive.
+CrtcInfo = namedtuple("CrtcInfo", "x y width height mode")
 ModeInfo = namedtuple("ModeInfo", "id width height dot_clock h_total v_total")
 
 MODES = [
@@ -18,9 +22,9 @@ MODES = [
 ]
 
 CRTC_INFOS = {
-    64: CrtcInfo(width=800, height=480, mode=1),
+    64: CrtcInfo(x=0, y=0, width=800, height=480, mode=1),
     # Stale CRTC left on a Disconnected output (live: HDMI-1 connection=1 but crtc=65, 1600x900)
-    65: CrtcInfo(width=1600, height=900, mode=0),
+    65: CrtcInfo(x=800, y=0, width=1600, height=900, mode=0),
 }
 
 PRIMARY_ID = 100

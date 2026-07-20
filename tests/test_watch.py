@@ -67,8 +67,15 @@ def _drive(monkeypatch, fake, script, topo):
     monkeypatch.setattr(watch.display, "Display", lambda: fake)
     monkeypatch.setattr(watch, "topology_hash", lambda logger=None: topo["hash"])
     applies = []
-    monkeypatch.setattr(watch, "apply_once",
-                        lambda env, logger, event_source: applies.append(event_source))
+
+    def _apply(env, logger, event_source):
+        # BL-01: apply_once's contract is now `-> bool` (True == a full apply
+        # completed). The fake must honour it, or every _drive test would exercise
+        # the new "apply bailed, do not absorb the hash" branch instead of the
+        # normal path it means to cover.
+        applies.append(event_source)
+        return True
+    monkeypatch.setattr(watch, "apply_once", _apply)
 
     pipe = {}
     real_pipe = os.pipe
@@ -162,6 +169,7 @@ def test_no_double_apply_from_own_mutations(monkeypatch, logger):
     def _apply(env, logger, event_source):
         applies.append(event_source)
         topo["hash"] = "h2"
+        return True  # BL-01: a completed apply
     monkeypatch.setattr(watch, "apply_once", _apply)
 
     watch.watch_loop(_env(), logger)
@@ -178,3 +186,100 @@ def test_randr_below_1_5_degrades_to_slow_poll(monkeypatch, logger):
 
     assert fake.selected_mask is None, "no event registration on RandR < 1.5"
     assert applies == []
+
+
+# ---------------- UX-02: replug bounce hold-down ----------------
+
+def _benv(hold="3000", suspect="5000"):
+    e = _env()
+    e["BOUNCE_HOLDDOWN_MS"] = hold
+    e["BOUNCE_SUSPECT_MS"] = suspect
+    return e
+
+
+def _churn(env, present, age_s=0.0):
+    return {
+        "times": [], "backoff": 0,
+        "window": int(env["EXCESS_WINDOW_SEC"]), "threshold": int(env["EXCESS_THRESHOLD"]),
+        "apply_done_at": watch.time.monotonic() - age_s,
+        "present": set(present),
+    }
+
+
+def test_bounce_returning_connector_is_suppressed(monkeypatch, logger):
+    # The whole point: a disconnect that resolves back to the pre-drop topology
+    # inside the hold-down must NOT reach apply_once, so scrub_stale never --off's
+    # the head and dwm never evacuates the windows it just restored.
+    env = _benv()
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: {"eDP-1"})
+    seq = iter(["h_dark", "h0"])  # first re-read still dark, second: bounced back
+    monkeypatch.setattr(watch, "topology_hash", lambda logger=None: next(seq))
+    monkeypatch.setattr(watch.stop_evt, "wait", lambda t: False)
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"})) is True
+
+
+def test_bounce_holddown_expires_when_head_really_gone(monkeypatch, logger):
+    # A genuine unplug that merely happens to land inside the suspect window must
+    # still be applied — delayed, never dropped.
+    env = _benv(hold="60")
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: {"eDP-1"})
+    monkeypatch.setattr(watch, "topology_hash", lambda logger=None: "h_dark")
+    monkeypatch.setattr(watch.stop_evt, "wait", lambda t: False)
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"})) is False
+
+
+def test_connect_edge_is_never_held(monkeypatch, logger):
+    # Gate 2. The genuine replug at 04:21 landed 3.1 s after apply_done — inside the
+    # 5 s suspect window. Holding it would delay every real replug.
+    env = _benv()
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: {"eDP-1", "HDMI-1"})
+    monkeypatch.setattr(watch, "topology_hash", _unreachable_hash)
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1"}, age_s=3.1)) is False
+
+
+def test_genuine_unplug_outside_suspect_window_is_not_delayed(monkeypatch, logger):
+    # Gate 1. Measured genuine unplugs sit 47–248 s after the previous apply; they
+    # must pay ZERO added latency, so we must not even read the topology.
+    env = _benv()
+    monkeypatch.setattr(watch, "present_connectors", _unreachable_present)
+    monkeypatch.setattr(watch, "topology_hash", _unreachable_hash)
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"}, age_s=47.4)) is False
+
+
+def test_holddown_zero_disables_feature(monkeypatch, logger):
+    env = _benv(hold="0")
+    monkeypatch.setattr(watch, "present_connectors", _unreachable_present)
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"})) is False
+
+
+def test_unreadable_topology_never_holds_down(monkeypatch, logger):
+    # present_connectors swallows to set(); an UNKNOWN edge direction must not be
+    # guessed at, so no baseline (or an unreadable one) means no hold-down.
+    env = _benv()
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: set())
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, set())) is False
+
+
+def test_holddown_bails_promptly_on_shutdown(monkeypatch, logger):
+    # WR-01: a multi-second hold must not add multi-second SIGTERM latency. It waits
+    # on stop_evt, never time.sleep, and a set flag aborts without suppressing.
+    env = _benv(hold="30000")
+    monkeypatch.setattr(watch, "present_connectors", lambda logger=None: {"eDP-1"})
+    monkeypatch.setattr(watch, "topology_hash", _unreachable_hash)
+    monkeypatch.setattr(watch.stop_evt, "wait", lambda t: True)  # signalled
+
+    assert watch._bounce_settled(env, logger, "h0", _churn(env, {"eDP-1", "HDMI-1"})) is False
+
+
+def _unreachable_hash(logger=None):
+    raise AssertionError("topology must not be re-read on this path")
+
+
+def _unreachable_present(logger=None):
+    raise AssertionError("topology must not be read on this path")

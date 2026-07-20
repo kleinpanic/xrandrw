@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "xrandrw"
-version = "0.1.1"
+version = "0.2.0"
 description = "Robust, zero-config X11 display hotplug policy daemon for dwm/i3"
 readme = "README.md"
 requires-python = ">=3.7"
@@ -22,8 +22,8 @@ dependencies = ["python-xlib>=0.31"]
 [project.optional-dependencies]
 journald = ["systemd-python"]
 wallpaper = ["Pillow"]
-test = ["pytest"]
-dev = ["pytest", "ruff==0.15.*", "vulture>=2.11", "build"]
+test = ["pytest", "pytest-cov>=5"]
+dev = ["pytest", "pytest-cov>=5", "ruff==0.15.*", "vulture>=2.11", "build"]
 
 [project.scripts]
 xrandrw = "xrandrw.cli:main"
@@ -38,6 +38,16 @@ where = ["src"]
 line-length = 110
 target-version = "py39"
 
+[tool.ruff.lint.per-file-ignores]
+# CI-04: the widened lint-strict gate (B,SIM,PERF,C90,UP,RUF over all of src/xrandrw/)
+# surfaces a few knowingly-accepted complexity/perf hits that this test/lint hardening
+# phase deliberately does NOT refactor. Suppressed via config (NOT inline `# noqa`) so the
+# behavior-safe `--select UP,RUF,SIM` autofix probe stays RUF100-clean while the strict gate
+# treats these as accepted. Each is a documented, intentional design, not a latent defect.
+"src/xrandrw/state.py" = ["C901"]     # ensure_profile: identity-resolution + profile-merge policy
+"src/xrandrw/windows.py" = ["C901"]   # capture_windows: multi-branch capture pipeline, each branch a documented degrade path
+"src/xrandrw/xrandr.py" = ["PERF203"] # edid_sysfs_read: per-connector best-effort EDID read; each sysfs node fails independently
+
 [tool.vulture]
 # Dead-code gate. `frame` is the signal-handler's required second arg (signal API
 # contract), structurally unused — the only legitimate false positive.
@@ -48,3 +58,53 @@ ignore_names = ["frame"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+# Deselect the real-dwm/X functional suite by DEFAULT so the fast unit runs
+# (`pytest -q`, the test/coverage CI jobs) never try to stand up Xvfb/Xephyr/dwm
+# -- the dedicated `functional` CI job opts back in with `pytest -m functional`,
+# which overrides this marker expression.
+addopts = "-m 'not functional'"
+markers = [
+  "functional: real Xephyr+Xvfb+dwm+dwm-ipc E2E (L1 gating on plain runner; L2 real Xorg+dummy non-gating); skipped locally without X/dwm, ERRORs (not skips) on CI",
+]
+
+[tool.mutmut]
+# TEST-06 mutation testing, scoped to the three window-mgmt modules. mutmut 3.6 keys only
+# (NO deprecated paths_to_mutate / tests_dir). B1 false-0-kill fix: the mutation runner MUST
+# run in a NON-editable venv (see ci/mutation_sanity_kill.sh) AND `pytest_add_cli_args` clears
+# the `pythonpath=["src"]` pytest override below, so pytest imports mutmut's mutated
+# `mutants/src` copy instead of the un-mutated editable source. Run nightly via
+# .github/workflows/mutation.yml, never per-PR.
+source_paths = ["src/xrandrw"]
+only_mutate = [
+    "src/xrandrw/dwmipc.py",
+    "src/xrandrw/windows.py",
+    "src/xrandrw/relocate.py",
+]
+also_copy = ["tests/"]
+pytest_add_cli_args_test_selection = [
+    "tests/test_dwmipc_parse.py",
+    "tests/test_dwmipc_env.py",
+    "tests/test_dwmipc_fuzz.py",
+    "tests/test_dwmipc_transport.py",
+    "tests/test_dwmipc_api.py",
+    "tests/test_relocate_control.py",
+    "tests/test_relocate_coverage.py",
+    "tests/test_relocate_lifecycle.py",
+    "tests/test_relocate_guard_precision.py",
+    "tests/test_relocate_watch.py",
+    "tests/test_windows_capture.py",
+    "tests/test_windows_identity.py",
+    "tests/test_mutation_kills.py",
+]
+pytest_add_cli_args = ["-o", "pythonpath="]
+
+[tool.coverage.run]
+# TEST-07 M5: `branch` is DELIBERATELY NOT set here. A global branch flag would turn
+# the scoped 3-module CI gate (dwmipc/windows/relocate, LINE-based) into a branch
+# gate and could fail 95-100%-LINE modules on untouched code. Branch is opt-in
+# per-run via `--cov-branch` on the WHOLE-PACKAGE ratchet ONLY (see ci.yml coverage).
+source = ["xrandrw"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+show_missing = true

@@ -4,7 +4,11 @@
 # 0 = use feh/fehbg; 1 = use xwallpaper
 USE_XWALLPAPER=1
 
-# Wallpaper path (used by feh/xwallpaper)
+# Wallpaper path. Honoured by the feh, xwallpaper and native backends ONLY.
+# The fehbg backend is a third-party script that chooses its own image and takes
+# no path argument, so WALL does NOTHING when it is selected (auto-detect prefers
+# fehbg when it is on PATH). xrandrw logs `wallpaper_wall_ignored` when that
+# happens; set WALLPAPER_ENGINE=feh below if you want WALL to be applied.
 WALL="$HOME/Pictures/wallpaper.jpg"
 
 # Treat eDP as HiDPI if preferred-mode width >= this
@@ -49,3 +53,37 @@ PREF_DEFAULT_SIDE=right-of
 # Pi4 users: uncomment to reproduce the pre-Phase-5 hardcoded DSI-1/HDMI-1 layout.
 # LAYOUT_PI4="DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
 
+# Window management (dwm-ipc). Opt-in, default off.
+# When enabled, on display UNPLUG xrandrw relocates the removed display's windows
+# onto a surviving display and, on REPLUG, moves the SAME process's window back
+# where it was — keyed by PID (Apple-like relocate-on-unplug / restore-on-replug).
+# REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
+# On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
+# feature is SILENTLY capability-gated OFF: no dwm-ipc call is issued and no window
+# is moved. Your core display layout, touch remap (TOUCH_MAP), and wallpaper are
+# entirely UNAFFECTED. This degradation contract is guarded by a dedicated
+# anti-regression CI suite (REG-01), not incidental — the gated-off / RPi4 path
+# can never silently break as the window-mgmt code evolves.
+# Inspect the feature's live state with:  xrandrw --window-state
+# WINDOW_MANAGEMENT=1
+
+
+# Replug bounce hold-down (UX-02). A physical replug rarely presents one clean
+# connect edge: the connector typically drops AGAIN a moment after coming back. If
+# the daemon believes that second drop it powers the head off, dwm evacuates the
+# windows that had just been restored, and the self-heal drags them back — four
+# visible window movements for one replug instead of two.
+#
+# When a disconnect arrives within BOUNCE_SUSPECT_MS of the previous apply, the
+# daemon treats it as SUSPECT and re-reads the topology for up to
+# BOUNCE_HOLDDOWN_MS before acting. If the connector returns within that window,
+# the whole off/on cycle is suppressed and no window moves.
+#
+# The wait is asymmetric and gated on purpose: CONNECT edges are never delayed, and
+# a genuine unplug (observed 47–248 s after the previous apply, vs 0.2–1 s for a
+# bounce) falls outside the suspect window and is healed immediately with no added
+# latency. Raise BOUNCE_HOLDDOWN_MS if your cable still produces a double cycle;
+# lower BOUNCE_SUSPECT_MS if a real unplug ever feels sluggish.
+# Set BOUNCE_HOLDDOWN_MS=0 to disable the hold-down entirely.
+# BOUNCE_SUSPECT_MS=5000
+# BOUNCE_HOLDDOWN_MS=3000

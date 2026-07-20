@@ -136,6 +136,44 @@ def test_conf_file_malformed_numeric_warns(monkeypatch, isolated_config, tmp_pat
     assert any("POLL_INTERVAL" in w for w in warnings)
 
 
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("1", "1"),
+        ("true", "1"),
+        ("yes", "1"),
+        ("0", "0"),
+        ("bogus", "0"),
+        ("", "0"),
+    ],
+)
+def test_window_management_coerce(monkeypatch, isolated_config, raw, expected):
+    monkeypatch.setenv("WINDOW_MANAGEMENT", raw)
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == expected
+
+
+def test_window_management_default_off(isolated_config):
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == "0"
+
+
+def test_window_management_precedence(monkeypatch, isolated_config, tmp_path):
+    sys_conf = tmp_path / "sys.conf"
+    user_conf = tmp_path / "user.conf"
+    sys_conf.write_text("WINDOW_MANAGEMENT=1\n")  # user conf silent
+    user_conf.write_text("HIDPI_WIDTH=1500\n")
+    monkeypatch.setattr(config, "CONF_SYS", sys_conf)
+    monkeypatch.setattr(config, "CONF_USER", user_conf)
+
+    env, _ = load_config()
+    assert env["WINDOW_MANAGEMENT"] == "1", "sys conf value survives where user conf is silent"
+
+    monkeypatch.setenv("WINDOW_MANAGEMENT", "0")
+    env2, _ = load_config()
+    assert env2["WINDOW_MANAGEMENT"] == "0", "process env must beat conf files"
+
+
 def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
     monkeypatch.delenv("LOCKFILE", raising=False)
     env, _ = load_config()
@@ -147,3 +185,27 @@ def test_load_config_lockfile_resolution(monkeypatch, isolated_config):
     env2, _ = load_config()
     assert env2["LOCKFILE"] == "/custom/path/my.lock"
     assert env2["STATE_LOCKFILE"].endswith("xrandrw.state.lock")
+
+
+def test_bounce_holddown_defaults(isolated_config):
+    env, warnings = load_config()
+    assert warnings == []
+    assert int(env["BOUNCE_HOLDDOWN_MS"]) == 3000
+    assert int(env["BOUNCE_SUSPECT_MS"]) == 5000
+
+
+def test_bounce_holddown_malformed_degrades_to_default(monkeypatch, isolated_config):
+    # 4-step config contract: _coerce_int never raises, the warning is deferred and
+    # replayed by cli.py rather than crashing a daemon at startup.
+    monkeypatch.setenv("BOUNCE_HOLDDOWN_MS", "soon")
+    env, warnings = load_config()
+    assert any("BOUNCE_HOLDDOWN_MS" in w for w in warnings)
+    assert env["BOUNCE_HOLDDOWN_MS"] == config.ENV_DEFAULTS["BOUNCE_HOLDDOWN_MS"]
+
+
+def test_bounce_holddown_zero_is_preserved_as_killswitch(monkeypatch, isolated_config):
+    # minimum=0, not 1: 0 is the documented way to turn the hold-down off entirely.
+    monkeypatch.setenv("BOUNCE_HOLDDOWN_MS", "0")
+    env, warnings = load_config()
+    assert warnings == []
+    assert env["BOUNCE_HOLDDOWN_MS"] == "0"

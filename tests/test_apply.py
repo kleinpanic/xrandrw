@@ -268,20 +268,57 @@ def test_reread_failure_logged_not_propagated(tmp_path, mock_x, logger, caplog, 
     assert errs and errs[0].levelno == logging.ERROR
 
 
+class _OffSpy:
+    def __init__(self):
+        self.offs = []
+
+    def output_off(self, connector, logger):
+        self.offs.append(connector)
+
+
 def test_scrub_stale_powers_off_lingering_head(output_factory, logger):
-    # Disconnected-but-lit head (the reported bug's state) must get an output_off
+    # Disconnected-but-lit head (the reported bug's state) must get an output_off.
+    # HDMI-2 is disconnected AND already dark, so since 14-08 it is skipped as pure
+    # waste (see the no-op comment in scrub_stale) -- an efficiency change, not a
+    # safety one; the LIT head below is what the scrub actually exists for.
+    # WR-03: a LIT head carries BOTH a mode and a CRTC origin -- randr_resources_to_outputs
+    # derives them from one crtc_info, so "mode but no position" is not a state any X
+    # server can produce. These fixtures predate `position` (added 14-08) and modelled it
+    # anyway; they now express the real thing so they agree with `Output.is_lit`, the one
+    # liveness definition. Assertions below are unchanged.
     outs = {
-        "DSI-1": output_factory("DSI-1", connected=True, current_mode=(800, 480)),
-        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900)),
+        "DSI-1": output_factory("DSI-1", connected=True, current_mode=(800, 480),
+                                position=(0, 0)),
+        "HDMI-1": output_factory("HDMI-1", connected=False, current_mode=(1600, 900),
+                                 position=(800, 0)),
         "HDMI-2": output_factory("HDMI-2", connected=False, current_mode=None),
     }
-    offs = []
+    spy = _OffSpy()
 
-    class FakeBackend:
-        def output_off(self, connector, logger):
-            offs.append(connector)
+    apply_mod.scrub_stale(outs, logger, spy)
 
-    apply_mod.scrub_stale(outs, logger, FakeBackend())
+    assert spy.offs == ["HDMI-1"]
+    assert "DSI-1" not in spy.offs
 
-    assert sorted(offs) == ["HDMI-1", "HDMI-2"]
-    assert "DSI-1" not in offs
+
+def test_scrub_stale_skips_already_dark_disconnected_output(output_factory, logger):
+    # No CRTC at all (position AND current_mode None) -> already dark -> no call.
+    outs = {"DP-3": output_factory("DP-3", connected=False, current_mode=None, position=None)}
+    spy = _OffSpy()
+
+    apply_mod.scrub_stale(outs, logger, spy)
+
+    assert spy.offs == [], "an --off against an output with no CRTC must not be issued"
+
+
+def test_scrub_stale_still_offs_disconnected_but_lit_output(output_factory, logger):
+    # The live-trace state: HPD down but the CRTC still driving pixels at (1920,0).
+    # This MUST still be powered off -- the xrandr.py topology_hash self-heal
+    # rationale depends on it and it is how a genuinely dead head gets healed.
+    outs = {"HDMI-1": output_factory("HDMI-1", connected=False,
+                                     current_mode=(1600, 900), position=(1920, 0))}
+    spy = _OffSpy()
+
+    apply_mod.scrub_stale(outs, logger, spy)
+
+    assert spy.offs == ["HDMI-1"]

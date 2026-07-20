@@ -7,3 +7,10 @@ __pycache__/
 *.pyc
 .planning/
 CLAUDE.md
+# transient coverage artifacts (pytest-cov json/data written by the CI gates)
+.coverage
+coverage-*.json
+# mutmut mutation-run scratch (source copy + per-mutant results; regenerated each run)
+mutants/
+.mutmut-cache
+session.sqlite
