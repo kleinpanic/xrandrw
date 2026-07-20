@@ -359,7 +359,16 @@ def test_one_window_failure_isolated(tmp_path, monkeypatch, logger):
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
 
-        # B's live client read raises for one window only (per-window DwmIpcUnavailable).
+        # B's live client read raises for one window only (per-window
+        # DwmIpcUnavailable) -- and B is gone from dwm's client list too, which is
+        # what an unreadable window actually means. B-1: the crash guard now
+        # resolves EVERY listed client to learn its tags/floating state, so a
+        # window that is both listed AND unresolvable makes the guard fail safe
+        # for the whole monitor (covered by
+        # test_unresolvable_client_fails_safe_blocks). Removing B from the server
+        # keeps this test on its actual subject: one window's failure must not
+        # stop the OTHER window from being restored.
+        srv.remove(B)
         orig_get = dwmipc.get_dwm_client
 
         def get_spy(win, path=None, **kw):
@@ -434,7 +443,16 @@ def test_tagmon_skipped_when_move_would_empty_source_monitor(tmp_path, monkeypat
     sock = tmp_path / "dwm.sock"
     # ONLY the displaced window exists on the surviving monitor -> a restore
     # tagmon would empty it. NO anchor here on purpose: this is the crash case.
-    clients = [_client(A, 4, 1, GA, True)]
+    #
+    # B-1: the window must be TILED for this to BE the crash case. dwm's tile()
+    # counts `n` via nexttiled, which skips floating clients -- so a lone FLOATING
+    # window landing on an empty monitor gives n == 0 there and n == 0 on the
+    # emptied source, the `if (n == 1 && selmon->sel->CenterThisWindow)` branch is
+    # never taken, and nothing is dereferenced. That move is SAFE and the
+    # float-aware guard now correctly allows it (see
+    # test_lone_floating_window_to_empty_monitor_is_allowed). A TILED window
+    # lands at n == 1 on the destination while selmon->sel is NULL: the SIGSEGV.
+    clients = [_client(A, 4, 1, GA, False)]
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
         control = MockControl(srv, events)
