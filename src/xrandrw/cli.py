@@ -152,8 +152,10 @@ def main():
     ap = argparse.ArgumentParser(description="xrandrw: robust display policy manager")
     g = ap.add_mutually_exclusive_group()
     g.add_argument("--apply", action="store_true", help="apply once (default)")
-    g.add_argument("--watch", action="store_true", help="poll topology and apply on change")
-    g.add_argument("--daemon", action="store_true", help="event-driven watch + apply on hotplug")
+    g.add_argument("--watch", action="store_true",
+                   help="event-driven watch: apply on RandR hotplug notifications")
+    g.add_argument("--daemon", action="store_true",
+                   help="same watch loop as --watch, plus the systemd sd_notify readiness handshake")
     g.add_argument("--print", action="store_true", help="print xrandr --query and exit")
     ap.add_argument("--set-pref", nargs=2, metavar=("OUTPUT_OR_ID", "SIDE"),
                     help="set preferred side: right-of|left-of|above|below")

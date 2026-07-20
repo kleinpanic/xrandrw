@@ -87,12 +87,20 @@ pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 | Command | Description |
 |---------|-------------|
 | `xrandrw --apply` | Apply the layout once (default when no flag is given). |
-| `xrandrw --watch` | Poll topology and re-apply on change. |
-| `xrandrw --daemon` | Watch for display changes via event-driven RandR notifications and re-apply (systemd entry point). |
+| `xrandrw --watch` | Event-driven watch: re-apply on RandR hotplug notifications. |
+| `xrandrw --daemon` | The same event-driven watch, plus the systemd `sd_notify` readiness handshake (the intended service entry point). |
 | `xrandrw --print` | Print `xrandr --query` output and exit. |
 | `xrandrw --set-pref OUTPUT_OR_ID SIDE` | Set a display's preferred side: `right-of`, `left-of`, `above`, `below`. |
 | `xrandrw --list-state` | Dump the placement state JSON. |
 | `xrandrw --window-state` | Print a JSON diagnostic of the window-mgmt feature state — enabled, dwm-ipc availability, and captured windows. |
+
+**`--watch` and `--daemon` run the identical loop.** Both register for RandR
+`ScreenChange`/`OutputChange`/`CrtcChange` notifications and block in `select()`
+on the X connection — neither one busy-polls. The only differences are that
+`--daemon` emits `sd_notify("READY=1")` for systemd `Type=notify` readiness and
+logs a `daemon_start` line. Use `--daemon` under systemd and `--watch` when
+running it by hand; the display behaviour is the same. (`POLL_INTERVAL` is the
+`select()` timeout in both — a slow safety net, not the detection mechanism.)
 
 ## Configuration
 
