@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 import subprocess
 import time
 
@@ -49,16 +50,34 @@ def _spawn_xterm(sock: str):
     before = _client_xids(sock)
     proc = subprocess.Popen(["xterm", "-e", "sleep", "600"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # WALL-CLOCK budget, not an iteration count. The old `range(80)` * 0.1s gave a
+    # hard 8s ceiling that is generous idle and far too tight on a loaded runner --
+    # xterm start + X map + dwm's manage cycle all contend for the same CPU. It
+    # flaked locally under parallel load and would flake in CI, and a gate that
+    # flakes teaches people to re-run it, which is worse than not having it.
+    # This wait is a PRECONDITION, not the assertion under test: nothing is proven
+    # by timing out sooner, so the budget is deliberately generous. Override with
+    # XRANDRW_SPAWN_TIMEOUT on a very slow machine.
+    budget = float(os.environ.get("XRANDRW_SPAWN_TIMEOUT", "30"))
+    deadline = time.monotonic() + budget
     xid = None
-    for _ in range(80):
+    while time.monotonic() < deadline:
+        # A DEAD xterm is a real failure, not a slow one -- fail immediately with
+        # the exit status instead of burning the whole budget on a corpse.
+        if proc.poll() is not None:
+            pytest.fail(f"xterm exited before dwm managed it (rc={proc.returncode}); "
+                        "is the harness DISPLAY up and is xterm installed?")
         new = _client_xids(sock) - before
         if new:
             xid = sorted(new)[0]
             break
         time.sleep(0.1)  # poll-backoff only
     if xid is None:
+        alive = proc.poll() is None
         proc.terminate()
-        pytest.fail("spawned xterm never appeared in the dwm client list")
+        pytest.fail(f"spawned xterm never appeared in the dwm client list within {budget}s "
+                    f"(process {'still alive' if alive else 'exited'}); "
+                    "raise XRANDRW_SPAWN_TIMEOUT if this machine is heavily loaded")
     return proc, xid
 
 
