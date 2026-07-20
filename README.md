@@ -123,10 +123,11 @@ absolute paths in full.
 | `USE_XWALLPAPER` | `0` = feh/fehbg, `1` = xwallpaper. |
 | `WALL` | Wallpaper image path. **Not honoured by the `fehbg` backend** — `fehbg` is a third-party script that picks its own image and takes no path argument, so `WALL` is a no-op there (logged as `wallpaper_wall_ignored`). Set `WALLPAPER_ENGINE=feh` (or `xwallpaper`/`native`) to have `WALL` applied. |
 | `HIDPI_WIDTH` | Treat internal panel as HiDPI when preferred-mode width ≥ this. |
-| `POLL_INTERVAL` | Watch-loop poll interval in seconds. |
+| `POLL_INTERVAL` | Slow safety-net `select()` timeout in seconds (default `45`). **Not the hotplug detection mechanism** — detection is event-driven via RandR, and this is only the fallback wakeup for the rare case an event is missed. Lowering it does *not* make hotplug faster; it just wastes CPU. |
 | `LOG_LEVEL` | `none`, `err`, `info`, `notice`, `debug`. |
 | `LOG_FILE` | Optional JSON-lines log file (unset = journald/stderr). |
-| `LOCKFILE` | Apply-lock path. |
+| `LOCKFILE` | Apply-lock path. **Defaults to `$XDG_RUNTIME_DIR/xrandrw.lock`**, falling back to `/run/user/$UID/` and then `~/.local/share/xrandrw/`. Deliberately never world-writable `/tmp`, so another local user cannot pre-create or squat the lock. Set it explicitly only if you have a reason to. |
+| `STATE_LOCKFILE` | Not user-settable — derived alongside `LOCKFILE` in the same per-user runtime directory (`xrandrw.state.lock`) and listed here only so it is not a surprise in a directory listing. |
 | `PREF_DEFAULT_SIDE` | Default side for new/unknown monitors. |
 | `EXCESS_WINDOW_SEC` / `EXCESS_THRESHOLD` | Churn-backoff window and threshold. |
 | `TOUCH_MAP` | Map touch/stylus devices to outputs, e.g. `"ELAN Touchscreen:eDP-1"`; `;`-separate multiple. |
@@ -208,12 +209,33 @@ Raise `BOUNCE_HOLDDOWN_MS` if your cable still produces a double cycle; lower
 `BOUNCE_SUSPECT_MS` if a real unplug ever feels sluggish; set
 `BOUNCE_HOLDDOWN_MS=0` to turn the feature off.
 
+**The cost, stated plainly.** A disconnect that *does* fall inside the suspect
+window pays up to `BOUNCE_HOLDDOWN_MS` (default 3 s) of added latency before the
+head is powered off — that is the trade the feature makes. And the default 3000
+is **a conservative bound, not a measured bounce duration**: the actual dark
+interval could not be resolved from either captured trace, because the daemon was
+blocked inside its own modeset for most of it. Both traces bound it at roughly
+1.7–3.0 s, so 3000 clears one comfortably and only just meets the other. Treat it
+as a knob to tune on your own hardware, not a figure derived from measurement.
+
+## Other known limitations
+
+- **`APPLY_BACKEND=native` is a stub.** It is a seam left in place for a future
+  pure-Xlib apply path. Selecting it logs a warning and delegates to the
+  `subprocess` backend; it does not change behaviour. `subprocess` is the only
+  real backend today.
+- The bounce hold-down latency described just above.
+- The window-management limitations listed under
+  [Window management](#window-management-dwm-ipc), which also records that live
+  hardware verification covers a single machine.
+
 ## Window management (dwm-ipc)
 
 An opt-in feature (default off) that gives display hotplug an Apple-like feel: on
 unplug, xrandrw relocates the removed display's windows onto a surviving display,
 and on replug it moves the **same process's** window back where it was — keyed by
-PID, so a re-launched program isn't confused for the original.
+`(pid, starttime)` read from `/proc`, not by PID alone, so a recycled PID cannot
+be mistaken for the original process.
 
 **Requirement.** This needs a dwm built with the
 [mihirlad55/dwm-ipc](https://github.com/mihirlad55/dwm-ipc) patch, which exposes a
@@ -265,6 +287,19 @@ daemon's `relocate_*` log events (`LOG_LEVEL=debug`) rather than this command.
   the first monitor's windows are restored onto the new one. Windows are keyed by
   connector name (`HDMI-1`), and although each record captures the monitor's EDID
   it is not currently consulted on restore.
+- **Mirrored outputs get no mapping, so relocation silently does nothing there.**
+  Two outputs both connected at identical position and mode are genuinely
+  ambiguous, and the dwm-monitor→connector matcher refuses to guess: it returns
+  `None` rather than binding arbitrarily. Records carrying `output=None` are never
+  eligible for displacement, so on a mirrored setup the feature is inert. This is
+  a deliberate refusal — guessing would risk moving windows to the wrong head —
+  but it is silent apart from a `window_monitor_unmatched` log line.
+
+**Verification scope.** The unplug/replug behaviour above has been confirmed by
+physical hardware testing on **exactly one machine** — a Dell laptop, `eDP-1` +
+`HDMI-1`, dwm 6.5 with the dwm-ipc patch. Everything else is covered by automated
+tests only. Other hardware, docks, and three-or-more-head configurations are
+plausible but unproven; please report what you find.
 
 ### Adoptability & graceful degradation
 

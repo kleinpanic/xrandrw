@@ -93,7 +93,8 @@ PREF_DEFAULT_SIDE=right-of
 # Window management (dwm-ipc). Opt-in, default off.
 # When enabled, on display UNPLUG xrandrw relocates the removed display's windows
 # onto a surviving display and, on REPLUG, moves the SAME process's window back
-# where it was — keyed by PID (Apple-like relocate-on-unplug / restore-on-replug).
+# where it was -- keyed by (pid, starttime) from /proc, not PID alone, so a recycled
+# PID is never mistaken for the original (Apple-like relocate/restore on unplug/replug).
 # REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
 # On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
 # feature is SILENTLY capability-gated OFF: no dwm-ipc call is issued and no window
