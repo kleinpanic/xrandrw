@@ -1,5 +1,12 @@
 # Copy to ~/.config/xrandrw.conf (user) or /etc/xdg/xrandrw.conf (system).
 # Values can also be set via environment; env wins over file.
+#
+# !! NO SHELL EXPANSION !!  This file is parsed as plain KEY=value lines, not
+# sourced by a shell. $HOME, ${XDG_...}, ~ and command substitution are NOT
+# expanded -- a value of "$HOME/wall.jpg" is stored as the literal 15-character
+# string "$HOME/wall.jpg" and will simply never resolve to a real file. Write
+# absolute paths in full: /home/youruser/wall.jpg
+# Surrounding single or double quotes are stripped; nothing else is interpreted.
 
 # 0 = use feh/fehbg; 1 = use xwallpaper
 USE_XWALLPAPER=1
@@ -9,7 +16,10 @@ USE_XWALLPAPER=1
 # no path argument, so WALL does NOTHING when it is selected (auto-detect prefers
 # fehbg when it is on PATH). xrandrw logs `wallpaper_wall_ignored` when that
 # happens; set WALLPAPER_ENGINE=feh below if you want WALL to be applied.
-WALL="$HOME/Pictures/wallpaper.jpg"
+# Absolute path only -- see the NO SHELL EXPANSION note at the top of this file.
+# Left commented so the built-in default (~/.local/share/wallpapers/space.jpg,
+# resolved correctly in Python) applies until you set a real path of your own.
+# WALL=/home/youruser/Pictures/wallpaper.jpg
 
 # Treat eDP as HiDPI if preferred-mode width >= this
 HIDPI_WIDTH=3200
@@ -22,7 +32,9 @@ POLL_INTERVAL=45
 LOG_LEVEL=notice
 
 # Optional JSON log file (structured logs). Comment out to disable.
-# LOG_FILE="$HOME/.local/state/xrandrw/xrandrw.log"
+# Absolute path only -- $HOME is NOT expanded (see the note at the top).
+# The directory must already exist.
+# LOG_FILE=/home/youruser/.local/state/xrandrw/xrandrw.log
 
 # Default side for new/unknown monitors: right-of|left-of|above|below
 PREF_DEFAULT_SIDE=right-of

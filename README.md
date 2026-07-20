@@ -105,9 +105,18 @@ running it by hand; the display behaviour is the same. (`POLL_INTERVAL` is the
 ## Configuration
 
 Config resolves from (lowest to highest precedence): built-in defaults →
-`/etc/xdg/xrandrw.conf` → `~/.config/xrandrw.conf` → process environment. Each
-key can be set in a config file (`KEY=value` lines) or via an environment
-variable of the same name.
+`/etc/xdg/xrandrw.conf` → `~/.config/xrandrw.conf` → process environment.
+
+Every key in the table below can be set in a config file (`KEY=value` lines) or
+via an environment variable of the same name. **`LAYOUT_*` is the exception: it
+is config-file-only**, because the environment overlay iterates a fixed key list
+that cannot enumerate arbitrary profile names.
+
+**Config files are not shell scripts.** They are parsed as plain `KEY=value`
+lines; surrounding quotes are stripped and nothing else is interpreted. `$HOME`,
+`${XDG_DATA_HOME}`, `~` and command substitution are **not expanded** — a `WALL`
+of `"$HOME/wall.jpg"` is stored as that literal string and never resolves. Write
+absolute paths in full.
 
 | Key | Purpose |
 |-----|---------|
