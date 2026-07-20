@@ -204,7 +204,7 @@ jobs:
           mkdir -p "$DWM_BUILD_CACHE"
           python -m venv .venv
           . .venv/bin/activate
-          pip install -e ".[test]"
+          pip install -e ".[test,wallpaper]"
           pytest -m functional tests/functional -v
 
   functional-vkms:
@@ -232,7 +232,7 @@ jobs:
         run: |
           python -m venv .venv
           . .venv/bin/activate
-          pip install -e ".[test]"
+          pip install -e ".[test,wallpaper]"
           # Real Xorg with the dummy driver commonly needs root/tty and may fail
           # "no screens found" on hosted runners -- hence this job is advisory.
           sudo Xorg -config "$PWD/tests/functional/dummy-2head.conf" :99 \
