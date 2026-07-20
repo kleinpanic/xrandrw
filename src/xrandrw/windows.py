@@ -480,6 +480,7 @@ def build_record(xid, identity, client, connector, edid) -> WindowRecord:
 def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # hardened multi-branch capture pipeline; each branch is a documented degrade path (see docstring)
                     hostname: str | None = None, sock_path: str | None = None,
                     timeout: float = dwmipc.DEFAULT_TIMEOUT,
+                    on_monitors=None,
                     logger: logging.Logger | None = None) -> list[WindowRecord]:
     """Read-only capture pipeline: enumerate + resolve + capture + associate.
 
@@ -492,6 +493,16 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # h
     ``timeout`` (AUDIT-B) is threaded into EVERY dwm-ipc call so a caller (the
     relocation coordinator) can bound each capture round-trip with its own
     ``ipc_timeout``; it defaults to ``dwmipc.DEFAULT_TIMEOUT`` for standalone use.
+
+    ``on_monitors`` (UX-01) is an optional observer called ONCE with the raw
+    ``get_monitors`` reply this capture already fetched, before any per-window
+    work. It exists so the relocation coordinator can record dwm's SELECTED
+    client as part of the same steady-state snapshot -- the user's last
+    known-good focus, sampled BEFORE any disconnect -- without paying a second
+    ``get_monitors`` round-trip on the settle path. It is a pure observer: it
+    cannot influence the returned records, and any exception it raises is
+    swallowed here (capture is read-only and must not fail because an observer
+    misbehaved).
     """
     lg = logger or _LOG
     if reader is None:
@@ -507,6 +518,9 @@ def capture_windows(*, reader=None, xreader=None, proc_root: str = "/proc",  # h
         logev(lg, logging.INFO, "window_capture_unavailable",
               "dwm ipc unavailable; capture skipped this cycle", error=str(e))
         return []
+    if on_monitors is not None:
+        with contextlib.suppress(Exception):
+            on_monitors(monitors)
 
     # 2/3. Read outputs (+ EDIDs) and build the monitor->connector association.
     # WR-01: a hotplug / X-restart race can make this live read raise transiently;

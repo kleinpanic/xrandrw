@@ -613,12 +613,25 @@ def test_dead_displaced_record_evicted_on_steady_settle(tmp_path, monkeypatch, l
 # UX-01 (focus theft): dwm's verbs act on the SELECTED client, so the coordinator
 # focuses every window it touches. Before this fix the user's own focus was never
 # captured and never given back -- with 3 windows over 2 bounce cycles that was
-# 6+ focus yanks in a few seconds, ending wherever the last verb landed. The
-# cycle must now capture the pre-restore selection ONCE and restore it ONCE.
+# 6+ focus yanks in a few seconds, ending wherever the last verb landed.
+#
+# The first attempt captured the selection at RESTORE-CYCLE ENTRY and live
+# testing refuted it: when a monitor dies dwm evacuates its clients and FOCUSES
+# one of them, which happens before the daemon even records the displacement. An
+# out-of-band sampler caught the steal ~2 s after the unplug and ~9 s before the
+# restore, so cycle-entry capture captured DWM'S choice and dutifully restored the
+# wrong window. The focus must therefore come from the STEADY-STATE snapshot --
+# the only sample taken before dwm gets a say.
+#
+# ``_evacuate`` models that faithfully: it selects the client it moves, exactly
+# as dwm does. Tests below rely on that; a fake that silently left the selection
+# alone could not reproduce the live failure and would pass vacuously.
 # ---------------------------------------------------------------------------
 
 USER = 0x140000A       # the user's own window, never displaced
 PID_U, ST_U = 1003, 7000
+USER2 = 0x140000B      # a second surviving window, for the snapshot-refresh test
+PID_U2, ST_U2 = 1004, 7100
 
 
 def _selection(sock):
@@ -634,38 +647,59 @@ def _selection(sock):
 
 
 def _focus_fixture(tmp_path, monkeypatch, extra_clients=()):
-    """Two displaced windows on DP-2 + the user's window on DP-1, all seeded."""
+    """Two displaced windows on DP-2 + the user's window(s) on DP-1, all seeded."""
     proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A), (PID_B, "b", ST_B),
-                                      (PID_U, "u", ST_U)])
+                                      (PID_U, "u", ST_U), (PID_U2, "u2", ST_U2)])
     events = []
     orig_run = _install_common(monkeypatch, events)
     clients = [_client(A, 4, 1, GA, True), _client(B, 8, 1, GB, True),
-               _client(USER, 1, 0, GB, False), *extra_clients]
+               _client(USER, 1, 0, GB, False), _client(USER2, 1, 0, GB, False),
+               *extra_clients]
     return proc_root, events, orig_run, clients
 
 
-def test_pre_restore_focus_is_restored_after_multi_window_cycle(
+def _focus_coord(srv, outs, events, proc_root, sock, control=None):
+    return relocate.RelocationCoordinator(
+        control=control if control is not None else MockControl(srv, events),
+        reader=FakeRandr(outs),
+        xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U, USER2: PID_U2}),
+        sock_path=str(sock), proc_root=proc_root)
+
+
+def test_steady_state_focus_survives_dwm_refocus_during_evacuation(
         tmp_path, monkeypatch, logger, caplog):
+    """THE live failure: dwm steals focus on the unplug, before any restore runs.
+
+    Reproduces the sampler trace exactly -- user focused on the surviving
+    monitor, monitor dies, dwm evacuates its clients and focuses one of them,
+    THEN the daemon restores. Capturing the focus at restore-cycle entry (the
+    pre-fix behaviour) captures dwm's pick and hands the user the wrong window;
+    only the steady-state snapshot holds the right answer.
+    """
     proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
     sock = tmp_path / "dwm.sock"
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
-        control = MockControl(srv, events)
-        coord = relocate.RelocationCoordinator(
-            control=control, reader=FakeRandr(outs),
-            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
-            sock_path=str(sock), proc_root=proc_root)
+        coord = _focus_coord(srv, outs, events, proc_root, sock)
 
+        # STEADY STATE: the user is working in THEIR window, all heads up. This
+        # is the only moment the user's real intent is observable.
+        srv.select(USER)
+        assert _selection(sock) == USER
         coord.on_settled({}, logger)
+
+        # UNPLUG: dwm evacuates DP-2's clients and focuses one of them (B) --
+        # this lands BEFORE the daemon records anything, exactly as live.
         _evacuate(orig_run, srv, sock, A)
         _evacuate(orig_run, srv, sock, B)
         _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
+        # NON-VACUOUS: the focus really is stolen before the restore cycle opens.
+        # Without this the test could pass against cycle-entry capture.
+        assert _selection(sock) == B
+        assert _selection(sock) != USER
 
-        # The user is working in THEIR window on the surviving monitor.
-        srv.select(USER)
-        assert _selection(sock) == USER
         _replug(outs, "DP-2")
         with caplog.at_level(logging.DEBUG, logger="xrandrw"):
             coord.on_settled({}, logger)
@@ -675,7 +709,8 @@ def test_pre_restore_focus_is_restored_after_multi_window_cycle(
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
         assert _wait_for(lambda: srv.state(B)["monitor_number"] == 1)
         assert sum(1 for e in events if e[0] == "focus") > 2
-        # ...and the user's selection is back where they left it.
+        # ...and the user's selection is back where THEY left it -- not where dwm
+        # moved it on the evacuation.
         assert _selection(sock) == USER
         assert any(getattr(r, "event", None) == "relocate_focus_restored"
                    for r in caplog.records)
@@ -685,25 +720,68 @@ def test_pre_restore_focus_is_restored_after_multi_window_cycle(
         assert focus_xids.count(USER) == 1
 
 
+def test_seed_captures_steady_state_focus(tmp_path, monkeypatch, logger):
+    """The FIRST snapshot is the boot seed; without focus there, the first
+    unplug of a session would have nothing to give back."""
+    proc_root, events, _orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
+    sock = tmp_path / "dwm.sock"
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = _focus_coord(srv, outs, events, proc_root, sock)
+
+        srv.select(USER)
+        assert coord._snapshot_focus is None       # nothing captured pre-seed
+        coord.on_settled({}, logger)               # boot seed
+        assert coord._snapshot_focus == (0, USER)  # DP-1 is dwm monitor 0
+
+
+def test_snapshot_focus_refreshes_on_each_steady_settle(
+        tmp_path, monkeypatch, logger, caplog):
+    """Refocusing during normal operation becomes the new known-good focus."""
+    proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
+    sock = tmp_path / "dwm.sock"
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = _focus_coord(srv, outs, events, proc_root, sock)
+
+        srv.select(USER)
+        coord.on_settled({}, logger)               # seed captures USER
+        assert coord._snapshot_focus == (0, USER)
+
+        # The user moves to another window; the next STEADY settle (no topology
+        # change) must adopt it.
+        srv.select(USER2)
+        coord.on_settled({}, logger)
+        assert coord._snapshot_focus == (0, USER2)
+
+        # ...and a full cycle from here gives back USER2, not USER.
+        _evacuate(orig_run, srv, sock, A)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert _selection(sock) == A               # dwm holds the evacuated window
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.DEBUG, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        assert _selection(sock) == USER2
+
+
 def test_focus_restore_graceful_when_focused_window_is_gone(
         tmp_path, monkeypatch, logger, caplog):
     proc_root, events, orig_run, clients = _focus_fixture(tmp_path, monkeypatch)
     sock = tmp_path / "dwm.sock"
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
-        control = MockControl(srv, events)
-        coord = relocate.RelocationCoordinator(
-            control=control, reader=FakeRandr(outs),
-            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
-            sock_path=str(sock), proc_root=proc_root)
+        coord = _focus_coord(srv, outs, events, proc_root, sock)
 
+        srv.select(USER)
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
         _evacuate(orig_run, srv, sock, B)
         _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
 
-        srv.select(USER)
         # The user CLOSES their focused window while the restore is in flight, so
         # the captured xid is no longer a live dwm client by give-back time.
         orig_restore_one = coord._restore_one
@@ -742,18 +820,16 @@ def test_focus_restore_failure_does_not_abort_cycle(tmp_path, monkeypatch, logge
 
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
-        coord = relocate.RelocationCoordinator(
-            control=BoomOnUserFocus(srv, events), reader=FakeRandr(outs),
-            xreader=_fake_xreader({A: PID_A, B: PID_B, USER: PID_U}),
-            sock_path=str(sock), proc_root=proc_root)
+        coord = _focus_coord(srv, outs, events, proc_root, sock,
+                             control=BoomOnUserFocus(srv, events))
 
+        srv.select(USER)
         coord.on_settled({}, logger)
         _evacuate(orig_run, srv, sock, A)
         _evacuate(orig_run, srv, sock, B)
         _unplug(outs, "DP-2")
         coord.on_settled({}, logger)
 
-        srv.select(USER)
         _replug(outs, "DP-2")
         with caplog.at_level(logging.DEBUG, logger="xrandrw"):
             coord.on_settled({}, logger)      # must not raise

@@ -91,7 +91,7 @@ def _selected_focus(monitors) -> tuple[int | None, int] | None:
     """Return ``(monitor_num, xid)`` of dwm's selected client, or None if nothing is.
 
     UX-01 focus preservation. This is the read half of "capture the user's focus
-    before the restore loop"; it reuses the exact reply fields
+    into the steady-state snapshot"; it reuses the exact reply fields
     :func:`_selected_confirmed` already trusts (``is_selected`` on the monitor,
     ``clients.selected`` on it), including the same fallback for replies that omit
     ``is_selected``. A ``selected`` of 0/None means dwm has NO selected client --
@@ -384,6 +384,20 @@ class RelocationCoordinator:
         self._ipc_timeout = ipc_timeout
         self._displaced: dict[tuple[int, int], object] = {}
         self._snapshot: dict[tuple[int, int], object] = {}
+        # UX-01: the STEADY-STATE focus, captured as part of the same snapshot as
+        # the window records -- i.e. the last selection observed while every head
+        # was still up. It is a `(monitor_num, xid)` or None.
+        #
+        # WHY NOT "whatever was selected when the restore cycle started": that was
+        # the first attempt and live testing REFUTED it. dwm evacuates a dying
+        # monitor's clients and FOCUSES one of them, and that happens before the
+        # daemon's own `_record_displaced` even runs. An out-of-band sampler caught
+        # it exactly: the user's terminal was selected at steady state, HDMI dropped,
+        # and 2 s later -- long before any restore -- dwm had already moved the
+        # selection to one of the evacuated windows. Capturing at cycle entry
+        # therefore captures DWM'S choice and faithfully restores the wrong window.
+        # The snapshot is the only sample taken before dwm gets a say.
+        self._snapshot_focus: tuple[int | None, int] | None = None
         # UX-01: count of focus steals. dwm's verbs act on the SELECTED client, so
         # every restore step yanks focus; the cycle restores the user's focus at
         # the end IFF it actually stole it (this counter moved). Without the
@@ -493,18 +507,36 @@ class RelocationCoordinator:
         On any failure log ``relocate_capture_fail`` and return the PREVIOUS
         snapshot unchanged -- a failed capture must never blow away the last
         good baseline (WM-08).
+
+        Also refreshes :attr:`_snapshot_focus` (UX-01) from the SAME
+        ``get_monitors`` reply the capture already fetches, via the
+        ``on_monitors`` observer -- no extra IPC round-trip on the settle path.
+        Because this runs on every steady settle AND on the boot seed, the
+        captured focus tracks the user: refocusing during normal operation makes
+        that the new known-good, and the very first unplug of a session already
+        has a focus to give back.
         """
         try:
             # AUDIT-B: thread ipc_timeout so capture_windows' internal dwmipc
             # calls honour the same per-call bound as the rest of the coordinator.
             recs = self._capture(reader=self._reader, xreader=self._xreader,
                                  proc_root=self._proc_root, sock_path=self._sock_path,
-                                 timeout=self._ipc_timeout, logger=logger)
+                                 timeout=self._ipc_timeout,
+                                 on_monitors=self._note_snapshot_focus, logger=logger)
             return {(r.pid, r.starttime): r for r in recs}
         except Exception as e:
             logev(logger, logging.WARNING, "relocate_capture_fail",
                   "capture failed; keeping previous snapshot", error=str(e))
             return self._snapshot
+
+    def _note_snapshot_focus(self, monitors) -> None:
+        """Record dwm's selected client into the steady-state snapshot (UX-01).
+
+        Called by ``capture_windows`` with the ``get_monitors`` reply it already
+        fetched. A reply with nothing selected yields None, which
+        :meth:`_restore_focus` treats as "nothing to give back".
+        """
+        self._snapshot_focus = _selected_focus(monitors)
 
     def _sweep_displaced(self, logger) -> None:
         """Evict displaced records whose ``(pid, starttime)`` is no longer live.
@@ -572,10 +604,12 @@ class RelocationCoordinator:
         the previous monitor's windows. See :meth:`_record_displaced` for why the
         EDID guard is deferred rather than implemented (WR-06).
 
-        FOCUS PRESERVATION (UX-01): the user's selection is captured ONCE here,
-        before the loop, and given back ONCE after it (:meth:`_restore_focus`) --
-        never per window, which would just be churn the next window's first verb
-        undoes. It is given back only if this cycle actually stole focus.
+        FOCUS PRESERVATION (UX-01): the selection given back is the STEADY-STATE
+        one (:attr:`_snapshot_focus`, sampled while all heads were still up), and
+        it is given back ONCE after the loop (:meth:`_restore_focus`) -- never per
+        window, which would just be churn the next window's first verb undoes, and
+        never re-read here, which would only observe dwm's post-evacuation choice.
+        It is given back only if this cycle actually stole focus.
         """
         t0 = time.monotonic()
         dropped = skipped = 0
@@ -591,11 +625,14 @@ class RelocationCoordinator:
             return
         mapping = match_dwm_monitor_to_output(monitors, outs, logger=logger)
         conn_to_mon = {conn: num for num, conn in mapping.items() if conn is not None}
-        # UX-01: capture the user's pre-restore focus ONCE, from the monitors reply
-        # we already fetched at cycle entry (no extra IPC). Restoring per-window
-        # would be pointless churn -- the next window's first verb would steal it
-        # straight back -- so the give-back happens once, after the whole loop.
-        prev_focus = _selected_focus(monitors)
+        # UX-01: the focus to give back is the STEADY-STATE one recorded with the
+        # snapshot, NOT whatever is selected right now. By the time this cycle
+        # runs dwm has already evacuated the dead monitor's clients and focused
+        # one of them, so "now" is dwm's choice, not the user's. Restoring
+        # per-window would be pointless churn -- the next window's first verb
+        # would steal it straight back -- so the give-back happens once, after
+        # the whole loop.
+        prev_focus = self._snapshot_focus
         focus_calls_at_entry = self._focus_calls
         for key, rec in list(self._displaced.items()):
             if stop_evt is not None and stop_evt.is_set():
@@ -640,13 +677,15 @@ class RelocationCoordinator:
         return _accepted(reply, verb, logger, **fields)
 
     def _restore_focus(self, prev, logger) -> None:
-        """Give the user's pre-restore focus back after a restore cycle (UX-01).
+        """Give the user's steady-state focus back after a restore cycle (UX-01).
 
         dwm's command verbs act on the SELECTED client, so the coordinator focuses
         every window it touches -- with 3 windows over 2 bounce cycles that is 6+
         focus yanks in a few seconds, and the user's own window is left selected
         wherever the last verb happened to land. ``prev`` is the
-        ``(monitor_num, xid)`` captured by :func:`_selected_focus` BEFORE the loop.
+        ``(monitor_num, xid)`` recorded into the snapshot by
+        :meth:`_note_snapshot_focus` at the last STEADY settle -- before the
+        unplug, and therefore before dwm's evacuation moved the selection.
 
         If that client is still live we simply refocus it (the same
         focus-then-confirm path the verbs use), which also restores the selected
