@@ -38,7 +38,7 @@ pip install -e ".[dev]"         # editable + ruff, vulture, pytest, build
 
 ## Usage
 
-`xrandrw` exposes six modes:
+`xrandrw` exposes seven modes:
 
 | Command | Description |
 |---------|-------------|
@@ -68,10 +68,39 @@ variable of the same name.
 | `LOCKFILE` | Apply-lock path. |
 | `PREF_DEFAULT_SIDE` | Default side for new/unknown monitors. |
 | `EXCESS_WINDOW_SEC` / `EXCESS_THRESHOLD` | Churn-backoff window and threshold. |
+| `TOUCH_MAP` | Map touch/stylus devices to outputs, e.g. `"ELAN Touchscreen:eDP-1"`; `;`-separate multiple. |
+| `WALLPAPER_ENGINE` | `feh`, `fehbg`, `xwallpaper`, `native`, or empty for auto-detect (default). Unknown values fall back to auto-detect. |
+| `APPLY_BACKEND` | `subprocess` (default). `native` is a seam-stub that warns and delegates to `subprocess` — not yet a real native path. |
+| `LAYOUT_*` | Named device profile — a fixed `xrandr` layout for an exact set of connectors. |
 | `WINDOW_MANAGEMENT` | Opt-in dwm-ipc window relocation on hotplug (`0` = off default, `1` = on). See [Window management (dwm-ipc)](#window-management-dwm-ipc). |
+| `BOUNCE_SUSPECT_MS` | A disconnect arriving this soon after an apply is treated as a possible replug bounce rather than a genuine unplug (default `5000`). |
+| `BOUNCE_HOLDDOWN_MS` | How long to keep re-reading the topology before believing a suspect disconnect (default `3000`). `0` disables the hold-down entirely. |
 
 See [`xrandrw.conf.sample`](xrandrw.conf.sample) for an annotated template —
 copy it to `~/.config/xrandrw.conf` and edit.
+
+### Replug bounce hold-down
+
+A physical replug rarely presents one clean connect edge — the connector
+typically drops **again** a moment after coming back. Taking that second drop at
+face value powers the head off, so windows that had just been restored get
+evacuated and then dragged back: four visible window movements for one replug
+instead of two.
+
+The hold-down closes that. When a disconnect arrives within `BOUNCE_SUSPECT_MS`
+of the previous apply, the daemon treats it as *suspect* and re-reads the
+topology for up to `BOUNCE_HOLDDOWN_MS` before acting. If the connector returns
+within that window, the whole off/on cycle is suppressed and no window moves.
+
+The wait is deliberately **asymmetric**: only the **disconnect** edge is held.
+Connect/replug edges are never delayed, and a **genuine unplug** — one arriving
+long after the previous apply, so outside the suspect window — is healed
+immediately with **no added latency**. That gating is the point: it keeps the
+common case fast while still absorbing the rare bounce.
+
+Raise `BOUNCE_HOLDDOWN_MS` if your cable still produces a double cycle; lower
+`BOUNCE_SUSPECT_MS` if a real unplug ever feels sluggish; set
+`BOUNCE_HOLDDOWN_MS=0` to turn the feature off.
 
 ## Window management (dwm-ipc)
 
@@ -109,6 +138,11 @@ even when the feature is off or no endpoint is present (never a traceback).
   nowhere to relocate to.
 - **Monitor targeting is relative.** Restore uses dwm's relative `tagmon`, so the
   target monitor is derived from the current topology, not an absolute index.
+- **Displaced windows are remembered by connector, not by monitor identity.** If
+  you unplug a monitor and then plug a *different* monitor into the same port,
+  the first monitor's windows are restored onto the new one. Windows are keyed by
+  connector name (`HDMI-1`), and although each record captures the monitor's EDID
+  it is not currently consulted on restore.
 
 ### Adoptability & graceful degradation
 
