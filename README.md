@@ -232,8 +232,24 @@ subsystem is a no-op.
 xrandrw --window-state
 ```
 
-which prints JSON `{enabled, dwmipc_available, captured, displaced}` and exits 0
-even when the feature is off or no endpoint is present (never a traceback).
+It always exits 0 — when the feature is off, when no endpoint is present, and
+even when the capture itself fails (never a traceback). The JSON keys are:
+
+| Key | Type | Meaning |
+|-----|------|---------|
+| `enabled` | bool | Whether `WINDOW_MANAGEMENT=1` is set. |
+| `dwmipc_available` | bool | Whether a usable dwm-ipc socket was found. |
+| `captured` | list | Window records read live from dwm. Empty unless **both** flags above are true. |
+| `displaced` | list | **Always empty here** — see below. |
+| `reason` | string | Present **only** on a degraded path, explaining which of the two gates failed. Absent when the feature is fully live. |
+
+**`displaced` is always `[]` from the CLI.** Displaced records — the windows
+evacuated from an unplugged output, awaiting its return — exist only in the
+memory of the *running daemon's* relocation coordinator. `--window-state` is a
+separate one-shot process with no coordinator of its own and no way to interrogate
+another process's, so it has nothing to report. The key is emitted regardless to
+keep the schema stable. To see relocation activity as it happens, read the
+daemon's `relocate_*` log events (`LOG_LEVEL=debug`) rather than this command.
 
 **Limitations.**
 

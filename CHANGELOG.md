@@ -29,7 +29,10 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   the existing event-driven RandR watch loop (no new polling), reusing its
   churn-backoff to settle before issuing focus-then-act dwm-ipc commands.
 - `WINDOW_MANAGEMENT` config key (default off) and a `--window-state` CLI
-  diagnostic printing the live captured/displaced window records as JSON.
+  diagnostic printing `{enabled, dwmipc_available, captured, displaced}` as JSON,
+  plus a `reason` key on degraded paths. It always exits 0. Note that `displaced`
+  is always empty from the CLI: displaced records live in the running daemon's
+  coordinator, which a separate one-shot process cannot read.
 - CI: a `--cov-fail-under=90` coverage gate on the new modules, an expanded
   `ruff` ruleset (`B`/`SIM`/`PERF`/`C90`/`UP`/`RUF`) job scoped to them, and a
   headless functional suite (a fake `AF_UNIX` dwm-ipc server + mocked Xlib +
