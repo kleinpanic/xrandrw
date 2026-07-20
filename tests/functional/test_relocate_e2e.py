@@ -83,7 +83,11 @@ def _wait_client(sock: str, xid: int, predicate, tries: int = 40):
 
 
 def _injected_outs(left_connected: bool = True, right_connected: bool = True):
-    """Two Outputs whose position+mode match the two harness dwm monitors."""
+    """Two Outputs whose position+mode match the two harness dwm monitors.
+
+    These flags model HPD only; both outputs come back LIT. To model an unplug the
+    coordinator actually acts on, use :func:`_unplug` -- not ``connected=False``.
+    """
     return {
         _LEFT: Output(_LEFT, connected=left_connected,
                       current_mode=(HARNESS_MONITORS[0]["width"], HARNESS_MONITORS[0]["height"]),
@@ -92,6 +96,44 @@ def _injected_outs(left_connected: bool = True, right_connected: bool = True):
                        current_mode=(HARNESS_MONITORS[1]["width"], HARNESS_MONITORS[1]["height"]),
                        position=(HARNESS_MONITORS[1]["x"], HARNESS_MONITORS[1]["y"])),
     }
+
+
+def _unplug(out: Output) -> None:
+    """Simulate a REAL unplug: drop HPD **and** darken the CRTC. Both, together.
+
+    The coordinator's removal edge is CRTC liveness, not HPD -- ``relocate.py``'s
+    ``cur = {name for name, o in outs.items() if o.is_lit}``, where
+    :attr:`xrandrw.xrandr.Output.is_lit` is
+    ``current_mode is not None and position is not None`` (14-08, WR-03).
+
+    So clearing ``connected`` ALONE models "unplugged but still lit": a real and
+    deliberate transient in which the apply has not torn the CRTC down yet, dwm
+    still owns that monitor and has NOT evacuated its windows, and the coordinator
+    therefore correctly records nothing. The removal the daemon acts on is the CRTC
+    going dark -- live, that is what ``scrub_stale``'s ``--off`` causes, and it is
+    what makes dwm evacuate.
+
+    ``randr_resources_to_outputs`` derives ``current_mode`` and ``position`` from a
+    single ``crtc_info``, so "lit with no position" is unrepresentable on real
+    hardware -- which is why the two fields must move together here. Do NOT
+    "simplify" this back to a bare ``connected`` flip: that silently stops the
+    record-on-unplug assertion in the test below from ever being exercised. This
+    mirrors the same fixture correction ``ecd6255`` applied to the unit tests.
+    """
+    out.connected = False
+    out.current_mode = None
+    out.position = None
+
+
+def _replug(out: Output, monitor: dict) -> None:
+    """Exact inverse of :func:`_unplug`: HPD returns AND the CRTC lights back up.
+
+    Restoring ``connected`` alone would leave the output dark, so ``is_lit`` stays
+    False and no return edge fires -- see :func:`_unplug` for why both move together.
+    """
+    out.connected = True
+    out.current_mode = (monitor["width"], monitor["height"])
+    out.position = (monitor["x"], monitor["y"])
 
 
 # --- L1 tests ----------------------------------------------------------------
@@ -267,7 +309,10 @@ def test_coordinator_on_settled_unplug_replug_injection(dwm_ipc):
         assert coord._snapshot, "seed capture found no windows on the real socket"
 
         # 2. unplug the RIGHT output -> the window's record becomes displaced.
-        outs[_RIGHT].connected = False
+        # Drops HPD *and* darkens the CRTC: the coordinator's removal edge is
+        # `o.is_lit`, not `o.connected` (see _unplug). A bare `connected = False`
+        # is the "unplugged but still lit" transient and records nothing.
+        _unplug(outs[_RIGHT])
         coord.on_settled(env={}, logger=_LOG)
         assert any(r.output == _RIGHT for r in coord._displaced.values()), \
             "unplug did not record the displaced window"
@@ -277,7 +322,9 @@ def test_coordinator_on_settled_unplug_replug_injection(dwm_ipc):
         _wait_client(sock, xid, lambda c: c["monitor_number"] == 0)
 
         # 3. replug the RIGHT output -> the window is restored to monitor 1.
-        outs[_RIGHT].connected = True
+        # Relights the CRTC as well as restoring HPD; the return edge is `is_lit`
+        # too, and _restore_returned needs the position to place the window.
+        _replug(outs[_RIGHT], HARNESS_MONITORS[1])
         coord.on_settled(env={}, logger=_LOG)
         client = _wait_client(sock, xid, lambda c: c["monitor_number"] == 1)
         assert client["monitor_number"] == 1, "replug did not restore the window's monitor"
