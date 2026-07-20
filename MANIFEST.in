@@ -1,0 +1,23 @@
+# Operator-facing files. The daemon-as-a-service IS the product, so an sdist
+# that carries only importable Python is not a usable distribution: the README's
+# entire "systemd user service" section (`make install`, `make enable`) is
+# unfollowable without these three files.
+include Makefile
+include xrandrw.conf.sample
+include systemd/xrandrw.service
+
+# Project docs beyond the setuptools defaults (README/LICENSE come in already).
+include CHANGELOG.md
+include SECURITY.md
+
+# Make the sdist self-testable rather than relying on setuptools' implicit
+# file discovery, which is not a stable contract.
+recursive-include tests *.py
+
+# These are DELIBERATELY absent from the wheel, not forgotten. A wheel unpacks
+# into site-packages, where a systemd unit file is unreachable by
+# `systemctl --user`, and `data_files` placement is unreliable under pipx/venv
+# (it lands relative to sys.prefix, i.e. inside the pipx-managed venv, not
+# ~/.config). Rather than ship a file to a path no one can use, the README
+# inlines the unit text verbatim so a plain `pipx install xrandrw` user can
+# copy it to ~/.config/systemd/user/xrandrw.service with no repo checkout.

@@ -193,17 +193,59 @@ backlog item so the scope choice is explicit rather than silent.
 
 ## systemd user service
 
-The repo ships a `--user` unit that runs `xrandrw --daemon` with `Restart=always`
-and `sd_notify` integration. Install and enable it via the Makefile:
+Running `xrandrw --daemon` as a `--user` service (with `Restart=always` and
+`sd_notify` integration) is the intended deployment. There are two paths.
+
+### From a plain `pipx install` (no repo checkout)
+
+The wheel on PyPI does **not** ship the unit file — a wheel unpacks into
+`site-packages`, where `systemctl --user` cannot reach it. Write it yourself:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/xrandrw.service <<'EOF'
+[Unit]
+Description=xrandrw: automatic X11 display hotplug policy (dwm)
+# Session helper: enabling this links it under dwm-session.target.wants/ and it
+# stops with the session. Generic (non-dwm) setups can retarget both lines to
+# graphical-session.target.
+After=dwm-session.target
+PartOf=dwm-session.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=%h/.Xauthority
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Environment=WALL=%h/.local/share/backgrounds/space.jpg
+Environment=LOG_LEVEL=notice
+# Environment=LOG_FILE=%h/.local/state/xrandrw/xrandrw.log
+# Optional: USE_XWALLPAPER=1 ; HIDPI_WIDTH=3200 ; PREF_DEFAULT_SIDE=right-of
+
+ExecStart=%h/.local/bin/xrandrw --daemon
+Restart=always
+RestartSec=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=dwm-session.target
+EOF
+```
+
+Adjust `WALL=` to a wallpaper you actually have (or delete the line). `pipx`
+places the console-script at `~/.local/bin/xrandrw`, which is exactly the
+`ExecStart` path above.
+
+### From a repo checkout
 
 ```bash
 make install    # pipx install . + copy conf sample + unit
 make enable     # systemctl --user daemon-reload && enable --now
 ```
 
-`make install` uses `pipx install --force .`, which places the console-script at
-`~/.local/bin/xrandrw` — exactly the `ExecStart` path the unit expects. Run
-`systemctl --user daemon-reload` after any reinstall.
+Run `systemctl --user daemon-reload` after any reinstall.
 
 ## License
 
