@@ -154,6 +154,18 @@ def _all_client_xids(monitors) -> set:
 # Action here because plan_restore is pure and focus is a live-X side effect.
 Action = namedtuple("Action", "verb args")
 
+# Which restore verbs are ESSENTIAL to calling a window "restored" (B-3).
+#
+# `tagmon` and `tag` are the two that decide WHERE THE USER SEES THE WINDOW: a
+# rejected `tagmon` leaves it on the wrong MONITOR, a rejected `tag` leaves it on
+# a tag the user may not be viewing -- in both cases the window is not back and
+# the record must survive so a later cycle retries. `togglefloating` and
+# `configure` are COSMETIC: the window is on the right monitor and tag, just
+# floating-vs-tiled or positioned differently than it was, which dwm's own
+# layout will render sensibly anyway. Dropping the record on a cosmetic-only
+# failure is correct -- retrying forever for a pixel offset would be churn.
+_ESSENTIAL_VERBS = ("tagmon", "tag")
+
 
 def _safe_close(d) -> None:
     if d is not None:
@@ -657,6 +669,10 @@ class RelocationCoordinator:
             if result == "drop":
                 del self._displaced[key]
                 dropped += 1
+            else:
+                # "keep" (B-3): an essential step did not take effect, so the
+                # record stays displaced for a later cycle to retry.
+                skipped += 1
         if self._focus_calls > focus_calls_at_entry:
             # Only give focus back if this cycle actually took it. Same
             # best-effort contract as every other step: a failure here must never
@@ -763,13 +779,31 @@ class RelocationCoordinator:
               "focus selection unconfirmed within budget; proceeding best-effort", xid=xid)
 
     def _restore_one(self, rec, monitors, conn_to_mon, logger) -> str:
-        """Restore ONE displaced record; return "drop" (done OR stale identity).
+        """Restore ONE displaced record; return "drop" (finished with it) or "keep".
 
         Re-resolves ``(pid, starttime)``: a dead OR reused-PID window (identity
         None/mismatch) is dropped WITHOUT any control call -- never touch another
         instance (spike 004 hard rule). Otherwise reads the live client, plans the
         restore, and executes each Action focus-then-act, each wrapped so one
         failed step never aborts the window.
+
+        B-3 -- A REJECTED RESTORE NO LONGER LOGS SUCCESS. UX-03 added
+        :meth:`_run_verb` / :func:`_accepted` so a dwm-side rejection is visible,
+        but this method DISCARDED the bool: with every verb rejected it still fell
+        through to log ``relocate_restore`` ("restored displaced window") and
+        return "drop", DELETING the record. The window was never restored, the
+        daemon said it was, and no later cycle retried -- the exact defect WP-01
+        fixed in ``wallpaper.py`` (a discarded returncode letting a failed apply
+        log success), reintroduced one layer up.
+
+        Now every ESSENTIAL verb's acceptance is tracked (:data:`_ESSENTIAL_VERBS`
+        -- ``tagmon``/``tag``, the two that decide where the user SEES the window).
+        A rejected or raised essential step means the record is KEPT in
+        ``_displaced`` and the cycle logs ``relocate_restore_incomplete`` at
+        WARNING instead of ``relocate_restore`` at INFO, so a later replug cycle
+        retries it. Cosmetic steps (``togglefloating``/``configure``) still follow
+        the WM-08 one-failed-step-never-aborts-the-window contract and never keep
+        the record alive on their own.
         """
         identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
         if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
@@ -785,13 +819,17 @@ class RelocationCoordinator:
             current_floating=bool(client["states"]["is_floating"]),
             n_monitors=len(monitors),
         )
+        essential_ok = True
         for action in plan_restore(rec, live):
             try:
                 if action.verb == "tagmon":
-                    self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
+                    if not self._tagmon_to_target(rec, action.args, target, len(monitors), logger):
+                        essential_ok = False
                 elif action.verb == "tag":
                     self._focus_and_confirm(rec.xid, logger)
-                    self._run_verb("tag", action.args, logger=logger, pid=rec.pid, xid=rec.xid)
+                    if not self._run_verb("tag", action.args, logger=logger,
+                                          pid=rec.pid, xid=rec.xid):
+                        essential_ok = False
                 elif action.verb == "togglefloating":
                     self._focus_and_confirm(rec.xid, logger)
                     self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
@@ -814,10 +852,21 @@ class RelocationCoordinator:
                     self._focus_and_confirm(rec.xid, logger)
                     self._control.configure_geometry(rec.xid, rel)
             except Exception as e:  # per-step guard is the WM-08 one-failure-never-aborts-window contract
-                # One failed step never aborts the window and never crashes.
+                # One failed step never aborts the window and never crashes -- but
+                # a RAISED essential step is just as much a non-restore as a
+                # REJECTED one, so it must not be reported as success either.
                 logev(logger, logging.WARNING, "relocate_step_fail",
                       "restore step failed; continuing", pid=rec.pid, verb=action.verb, error=str(e))
+                if action.verb in _ESSENTIAL_VERBS:
+                    essential_ok = False
                 continue
+        if not essential_ok:
+            logev(logger, logging.WARNING, "relocate_restore_incomplete",
+                  "an essential restore step (tagmon/tag) did not take effect; the window "
+                  "is NOT back where it was -- keeping the displaced record so a later "
+                  "cycle retries it",
+                  pid=rec.pid, output=rec.output, xid=rec.xid)
+            return "keep"
         logev(logger, logging.INFO, "relocate_restore",
               "restored displaced window", pid=rec.pid, output=rec.output)
         return "drop"
@@ -885,8 +934,13 @@ class RelocationCoordinator:
         any_singleton = any(c == 1 for c in post.values())
         return source_emptied and any_singleton
 
-    def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> None:
+    def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> bool:
         """Bounded focus-then-tagmon loop: at most ``n_monitors`` hops.
+
+        Returns True IFF the window is confirmed ON ``target``; False for every
+        non-arrival (crash-guard skip, dwm rejection, hop-bound giveup). ``tagmon``
+        is an ESSENTIAL verb (B-3): a False here keeps the displaced record so a
+        later cycle retries, instead of reporting a restore that did not happen.
 
         Focus precedes EVERY hop (selection drifts), re-reads ``monitor_number``
         after each ``tagmon`` and stops on match; on no-match after the bound logs
@@ -912,13 +966,18 @@ class RelocationCoordinator:
                       "with the single-window-center patch; leaving window on its "
                       "current monitor",
                       pid=rec.pid, xid=rec.xid, target=target)
-                return
+                return False
             self._focus_and_confirm(rec.xid, logger)
-            self._run_verb("tagmon", direction, logger=logger, pid=rec.pid, xid=rec.xid)
+            if not self._run_verb("tagmon", direction, logger=logger,
+                                  pid=rec.pid, xid=rec.xid):
+                # dwm would reject every subsequent identical hop the same way;
+                # the window has not moved, so this is a non-arrival (B-3).
+                return False
             cur = dwmipc.get_dwm_client(rec.xid, path=self._path,
                                         timeout=self._ipc_timeout)["monitor_number"]
             if cur == target:
-                return
+                return True
         logev(logger, logging.WARNING, "relocate_monitor_giveup",
               "tagmon did not reach target monitor within bound; leaving as-is",
               pid=rec.pid, target=target)
+        return False

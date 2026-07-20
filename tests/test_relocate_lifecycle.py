@@ -936,7 +936,7 @@ def test_dwm_rejection_is_surfaced_not_silently_swallowed(
 
         monkeypatch.setattr(relocate.dwmipc, "run_command", rejecting_run)
         _replug(outs, "DP-2")
-        with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
             coord.on_settled({}, logger)
 
         rejected = [r for r in caplog.records
@@ -944,7 +944,81 @@ def test_dwm_rejection_is_surfaced_not_silently_swallowed(
         assert rejected, "a dwm-side rejection must be logged, not pass as success"
         assert rejected[0].verb == "tag"
         assert rejected[0].reason == "Type mismatch"
-        # WM-08 stands: the rejection is NOT fatal. The window still reached its
-        # target monitor via the (accepted) tagmon, and the record still dropped.
+        # WM-08 stands: the rejection is NOT fatal to the CYCLE -- the window still
+        # reached its target monitor via the (accepted) tagmon and nothing raised.
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        # B-3: but `tag` is ESSENTIAL -- A is on the right monitor carrying the
+        # WRONG TAGS, so it is NOT restored. The record must SURVIVE for a later
+        # cycle to retry, and the daemon must not claim a restore it did not do.
+        # (This assertion previously read `not in coord._displaced`: it encoded
+        # the defect, because _restore_one discarded _run_verb's bool and dropped
+        # the record while logging success.)
+        assert (PID_A, ST_A) in coord._displaced
+        events_logged = [getattr(r, "event", None) for r in caplog.records]
+        assert "relocate_restore" not in events_logged, \
+            "a window whose essential verb was rejected must not log a restore"
+        assert "relocate_restore_incomplete" in events_logged
+
+
+def test_all_verbs_rejected_keeps_record_and_logs_no_restore(
+        tmp_path, monkeypatch, logger, caplog):
+    """B-3: when dwm rejects EVERY verb, nothing was restored -- say so, keep the record.
+
+    The pre-fix code discarded ``_run_verb``'s bool on the restore path
+    (``_restore_one`` tag/togglefloating, ``_tagmon_to_target`` tagmon; only
+    ``_focusmon_to`` acted on it). With every command refused it still fell
+    through to ``logev(... "relocate_restore", "restored displaced window")`` and
+    returned "drop", DELETING the record: the window sat exactly where dwm's
+    evacuation left it, the daemon logged a success, and because the record was
+    gone no later cycle ever retried. This pins the corrected outcome.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    _install_common(monkeypatch, events)
+    orig_run = dwmipc.run_command
+    sock = tmp_path / "dwm.sock"
+
+    def reject_everything(name, *args, **kw):
+        events.append(("cmd", name, args))
+        return {"result": "error", "reason": f"Command {name} not found"}
+
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=MockControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)      # dwm evacuates A: monitor 1 -> 0
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        monkeypatch.setattr(relocate.dwmipc, "run_command", reject_everything)
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # Nothing took effect: A is still where dwm's evacuation left it.
+        assert srv.state(A)["monitor_number"] == 0
+
+        events_logged = [getattr(r, "event", None) for r in caplog.records]
+        # THE CORE OF B-3: no success log, and the record SURVIVES so a later
+        # replug cycle retries the window instead of silently losing it.
+        assert "relocate_restore" not in events_logged, \
+            "every verb was rejected -- the daemon must not log a restore"
+        assert "relocate_restore_incomplete" in events_logged
+        assert (PID_A, ST_A) in coord._displaced, \
+            "a wholly-rejected restore must LEAVE the record for a later retry"
+
+        # And a later cycle really does retry it: with dwm accepting again, the
+        # same record restores and only THEN drops.
+        monkeypatch.setattr(relocate.dwmipc, "run_command", orig_run)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        _replug(outs, "DP-2")
+        coord.on_settled({}, logger)
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
         assert (PID_A, ST_A) not in coord._displaced

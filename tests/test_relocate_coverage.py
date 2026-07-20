@@ -196,8 +196,13 @@ def test_restore_one_togglefloating_and_step_fail_swallow(monkeypatch, caplog, l
         monitors = [{"num": 0,
                      "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080}}]
         result = coord._restore_one(rec, monitors=monitors, conn_to_mon={"DP-1": 0}, logger=logger)
-    assert result == "drop"
-    # tag + togglefloating run_command both raised and were swallowed per-step.
+    # B-3: `tag` is ESSENTIAL and it RAISED, so the window is not back on its saved
+    # tag -- the record is KEPT for a later retry. (This previously asserted "drop":
+    # it encoded the defect where a wholly-failed restore still deleted the record.)
+    assert result == "keep"
+    assert _has(caplog, "relocate_restore_incomplete")
+    # ...but WM-08 still holds: neither raise propagated, and the LATER steps still
+    # ran. tag + togglefloating run_command both raised and were swallowed per-step.
     assert _has(caplog, "relocate_step_fail")
     # configure went through the control seam (not run_command) and applied.
     assert (5, {"x": 0, "y": 0, "width": 1, "height": 1}) in control.configured
