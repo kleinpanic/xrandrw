@@ -48,11 +48,19 @@ SUBSCRIBE = 5
 EVENT = 6
 
 # Canned valid payloads (shapes match the 08-01 validators).
+# dwm's default 9-tag mask, i.e. "every tag is being viewed". Used as the default
+# per-monitor tagset so a test that does not care about tag visibility gets the
+# old all-clients-visible behavior for free (B-1).
+ALL_TAGS = 0x1FF
+
 VALID_MONITORS = [
     {
         "num": 0,
         "monitor_geometry": {"x": 0, "y": 0, "width": 1920, "height": 1080},
         "layout": {"symbol": "[]="},
+        # dwm dumps mon->tagset[mon->seltags] here; the B-1 crash guard needs it
+        # to know which clients are ISVISIBLE.
+        "tagset": {"current": ALL_TAGS, "old": ALL_TAGS},
         "clients": {"all": [0x1400001]},
     }
 ]
@@ -98,7 +106,8 @@ class FakeDwmServer:
 
     def __init__(self, path, mode: str = "auto", *, monitors=None, client=None,
                  run_result=None, oversized_size: int = 256 * 1024 * 1024,
-                 trickle_interval: float = 0.05, clients=None, select_lag: int = 0):
+                 trickle_interval: float = 0.05, clients=None, select_lag: int = 0,
+                 tagsets=None):
         if mode not in _VALID_MODES and mode not in _HOSTILE_MODES:
             raise ValueError(f"unknown fake-server mode {mode!r}")
         self.path = str(path)
@@ -124,6 +133,11 @@ class FakeDwmServer:
         self._select_lag = int(select_lag)
         self._pending_select: Optional[int] = None
         self._pending_lag = 0
+        # B-1: per-monitor VIEWED tagset (dwm's mon->tagset[mon->seltags]), as
+        # {monitor_num: mask}. Defaults to ALL_TAGS for every monitor, so a test
+        # that does not exercise tag visibility sees every client as visible --
+        # exactly what the suite assumed before tag-awareness existed.
+        self._tagsets: dict = dict(tagsets or {})
         if clients is not None:
             for c in clients:
                 self._clients[int(c["xid"])] = copy.deepcopy(c)
@@ -295,11 +309,15 @@ class FakeDwmServer:
             xids = [xid for xid, c in self._clients.items()
                     if int(c["monitor_number"]) == num]
             mon_sel = sel if (sel in xids) else None
+            tagset = self._tagsets.get(num, ALL_TAGS)
             mons.append({
                 "num": num,
                 "monitor_geometry": {"x": num * 1920, "y": 0, "width": 1920, "height": 1080},
                 "layout": {"symbol": "[]="},
                 "is_selected": mon_sel is not None,
+                # B-1: dwm dumps mon->tagset[mon->seltags]; the crash guard needs
+                # it to decide which of `clients.all` are actually ISVISIBLE.
+                "tagset": {"current": tagset, "old": tagset},
                 "clients": {"all": xids, "selected": mon_sel},
             })
         if self._pending_select is not None:

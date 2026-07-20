@@ -29,11 +29,19 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   the existing event-driven RandR watch loop (no new polling), reusing its
   churn-backoff to settle before issuing focus-then-act dwm-ipc commands.
 - `WINDOW_MANAGEMENT` config key (default off) and a `--window-state` CLI
-  diagnostic printing the live captured/displaced window records as JSON.
-- CI: a `--cov-fail-under=90` coverage gate on the new modules, an expanded
-  `ruff` ruleset (`B`/`SIM`/`PERF`/`C90`/`UP`/`RUF`) job scoped to them, and a
-  headless functional suite (a fake `AF_UNIX` dwm-ipc server + mocked Xlib +
-  fake `/proc`) that exercises the full lifecycle with no X server or hardware.
+  diagnostic printing `{enabled, dwmipc_available, captured, displaced}` as JSON,
+  plus a `reason` key on degraded paths. It always exits 0. Note that `displaced`
+  is always empty from the CLI: displaced records live in the running daemon's
+  coordinator, which a separate one-shot process cannot read.
+- CI: a scoped line-coverage gate of 95 on the new modules plus a whole-package
+  `--cov-branch --cov-fail-under=85` ratchet; the expanded `ruff` ruleset
+  (`B`/`SIM`/`PERF`/`C90`/`UP`/`RUF`) across all of `src/xrandrw/`; `pylint`
+  duplicate-code and `vulture` dead-code jobs; a `cli-smoke` job that invokes the
+  really-installed console-script; a display-free suite (fake `AF_UNIX` dwm-ipc
+  server + mocked Xlib + fake `/proc`) needing no X server or hardware; a
+  real-dwm functional tier built from a vendored dwm-ipc patch under
+  Xephyr-in-Xvfb; a no-dwm-ipc anti-regression workflow; and a nightly mutation
+  ratchet.
 - `SECURITY.md` documenting the local-desktop threat posture and accepted risks.
 
 ### Fixed
@@ -60,16 +68,106 @@ behaviour untouched. Opt-in via `WINDOW_MANAGEMENT=1`.
   instead of being silently treated as success, and `tagmon` never emits a
   negative direction — some dwm-ipc builds reject a negative argument outright.
   This was latent on 3-or-more-monitor setups only.
+- The wallpaper backends now verify that the wallpaper was actually applied and
+  fall through to the next candidate on failure, instead of treating "the command
+  ran" as success.
+
+### Packaging
+- `requires-python = ">=3.9"` is now declared, matching what the CI matrix
+  actually tests, so `pip` will not install the package onto an older interpreter.
+- Per-version Python classifiers (3.9 – 3.13) added, so PyPI shows a real
+  supported-version range rather than a bare "3".
+- The sdist now ships the operator-facing files (config sample, systemd unit)
+  that were previously missing from it. Because a wheel unpacks into
+  `site-packages` where `systemctl --user` cannot reach it, the README now also
+  inlines the unit file for `pipx` users.
+
+### Documentation
+- **The release gate on the live-hardware verify stamp now checks freshness
+  rather than mere existence.** It previously tested only that the stamp file
+  existed, so it would have passed on any future commit regardless of drift. It
+  now verifies the stamp certifies the release's own version, that the verified
+  commit is an ancestor of the tag, and fails if `src/xrandrw/` changed since —
+  with a sha-pinned, reasoned waiver as the only escape hatch.
+- Corrected a number of claims that had drifted from the code: `--watch` and
+  `--daemon` run the identical event-driven loop (they were documented as polling
+  vs event-driven); `POLL_INTERVAL` is a slow safety-net timeout, not the hotplug
+  detection mechanism; `LOCKFILE` defaults to `$XDG_RUNTIME_DIR`, never
+  world-writable `/tmp`; relocation keys on `(pid, starttime)`, not PID; the
+  functional test tier needs a real X server and dwm rather than being
+  display-free; `LAYOUT_*` matching is exact set equality and is config-file-only;
+  and the README lede no longer claims the project is pure standard library.
+- The shipped `xrandrw.conf.sample` no longer contains `$HOME`-prefixed paths.
+  Config files are not shell-sourced, so those were stored as literal unexpanded
+  strings and could never resolve — making the sample worse than the built-in
+  defaults it overrode. The no-expansion rule is now stated explicitly.
+- `--window-state`'s real output schema is documented, including the `reason` key
+  and the fact that `displaced` is always empty from the CLI.
+- Added scope (X11 only; expect conflicts with GNOME/KDE), a prerequisites table
+  separating required from optional binaries, uninstall instructions, and a
+  warning that the shipped unit's `dwm-session.target` will silently stop pulling
+  the service in after a reboot on systems that do not define that target.
+- Repo-file links are now absolute GitHub URLs so they resolve on PyPI.
 
 ### Notes
 - Fullscreen state is captured but not reapplied on restore; cross-monitor moves
   need ≥2 heads; `tagmon` is relative. Documented in the README.
-- Expanding the new ruff rulesets across the v0.1.0 modules is a tracked
-  follow-up (the gate is scoped to the new window-management modules for now).
+- The expanded ruff ruleset now covers **all** of `src/xrandrw/`, not just the new
+  window-management modules; the earlier scoping deferral is closed.
 - The unplug/replug fixes above were confirmed by a physical unplug/replug on a
   single machine (a Dell laptop, `eDP-1` + `HDMI-1`, dwm 6.5 with dwm-ipc), in
   addition to the headless suite. Other hardware and multi-head configurations
   are covered by the automated tests only.
+
+## [0.1.1] - 2026-07-18
+
+Correctness pass over placement persistence, internal-panel detection, and the
+event loop, plus touchscreen remapping and the first real CI.
+
+### Added
+- `TOUCH_MAP` config key — re-maps touch/stylus devices to their output after
+  *every* apply. `xinput map-to-output` bakes in the output's geometry at call
+  time, so a one-shot login-time remap goes stale whenever a panel moves
+  (plug/unplug/side-swap); re-applying per-apply is the fix. Format
+  `"<device-substring>:<OUTPUT>[;...]"`, case-insensitive, multiple devices
+  supported. Empty by default, so `xinput` stays an optional dependency. Never
+  maps onto a disconnected output.
+- CI (`ci.yml`): `pytest` across Python 3.9 / 3.11 / 3.13 and a `vulture`
+  dead-code job, both in virtualenvs.
+- Release automation (`release.yml`): building on a published GitHub Release,
+  attaching artifacts, and uploading to PyPI via `PYPI_API_TOKEN`.
+- PyPI version/pyversions/license badges in the README.
+
+### Changed
+- **State file location.** `state_path()` now honours `XDG_DATA_HOME` and is
+  resolved at call time rather than frozen into a module constant. If you have
+  `XDG_DATA_HOME` set to something other than `~/.local/share`, your `state.json`
+  moves accordingly — the remembered EDID-to-profile map and attach-order stack
+  live at `$XDG_DATA_HOME/xrandrw/state.json`. Unset, the path is unchanged.
+- The systemd helper unit no longer declares a backwards
+  `Wants=dwm-session.target`; a session helper should only `WantedBy` + `PartOf`
+  its session target.
+
+### Fixed
+- **`--set-pref` had no effect on placement.** `apply_once` placed externals by
+  attach-stack *index* and never read `preferred_side`; its only reader was dead
+  code. A monitor explicitly set `left-of` still landed `right-of`, defeating the
+  core "put monitors where you left them" promise. Placement now takes
+  `(item, preferred_side)` pairs — each display lands on its stored side,
+  collisions fall back to the next free side, and chains of 5+ externals still
+  resolve.
+- **The internal panel is now always primary on DSI/DPI hardware.** Internal-LCD
+  detection matched only `eDP`/`LVDS`, so on a Raspberry Pi (DSI) the built-in
+  panel was not forced primary and won only by alphabetical luck in the
+  no-internal fallback path. `DSI` and `DPI` now qualify.
+- **No more redundant second apply on every hotplug.** `apply_once`'s own
+  `xrandr` calls emit RandR notifications; the watch loop returned the *pre*-apply
+  topology hash, so the settled post-apply state read as a fresh change and
+  triggered an idempotent-but-wasteful second apply. It now returns the
+  post-apply hash and absorbs its own events.
+- Tests can no longer read or write the real `~/.local/share/xrandrw/state.json`
+  — an autouse fixture redirects `XDG_DATA_HOME` per test, closing a hole where
+  unisolated `apply_once` tests wrote junk outputs into live user state.
 
 ## [0.1.0] - 2026-07-05
 

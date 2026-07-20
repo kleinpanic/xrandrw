@@ -24,13 +24,20 @@ is pre-checked to be a current-uid-owned socket before connecting.
 The following are **deliberate design choices** appropriate to the local
 single-user posture above, not defects:
 
-1. **`subscribe()` returns an un-lifecycle-managed socket by design.**
-   `dwmipc.subscribe()` performs the SUBSCRIBE handshake and returns the live,
-   still-open socket to its caller. It does **not** read, loop, or close it. The
-   EVENT-stream consumption loop and socket close/cleanup are owned by the
-   Phase 10 relocation lifecycle caller. Until that caller exists, holding the
-   returned socket open is intentional; the caller is responsible for closing
-   it.
+1. **`subscribe()` returns an un-lifecycle-managed socket by design, and
+   currently has no caller at all.** `dwmipc.subscribe()` performs the SUBSCRIBE
+   handshake and returns the live, still-open socket to its caller. It does
+   **not** read, loop, or close it; whoever calls it owns the EVENT-stream
+   consumption loop and the close/cleanup.
+
+   As shipped, **nothing in xrandrw calls it.** The relocation lifecycle landed
+   in Phase 10 built on the existing RandR-driven watch loop plus request/response
+   dwm-ipc calls, so the dwm EVENT stream is never subscribed to and no such
+   socket is ever opened in normal operation. `subscribe()` remains part of the
+   client's public surface for external users of the module and for a possible
+   future event-driven path. Its unmanaged-socket contract is therefore a
+   documented property of an unused entry point rather than a live resource risk;
+   it should be revisited if and when an in-tree caller is added.
 
 2. **`run_command` / `subscribe` return values are not shape-validated by
    design.** Unlike `get_monitors` / `get_dwm_client` (which run strict shape

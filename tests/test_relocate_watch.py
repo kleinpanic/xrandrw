@@ -435,6 +435,11 @@ class FakeDwm:
             mons.append({"num": num,
                          "monitor_geometry": {"x": x, "y": y, "width": width, "height": height},
                          "is_selected": sel is not None,
+                         # B-1: dwm dumps mon->tagset[mon->seltags]. This world
+                         # views every tag, so every client here is ISVISIBLE --
+                         # matching what the fixture assumed before the crash
+                         # guard became tag-aware.
+                         "tagset": {"current": 0x1FF, "old": 0x1FF},
                          "clients": {"all": allc, "selected": sel}})
         return mons
 

@@ -1,5 +1,12 @@
 # Copy to ~/.config/xrandrw.conf (user) or /etc/xdg/xrandrw.conf (system).
 # Values can also be set via environment; env wins over file.
+#
+# !! NO SHELL EXPANSION !!  This file is parsed as plain KEY=value lines, not
+# sourced by a shell. $HOME, ${XDG_...}, ~ and command substitution are NOT
+# expanded -- a value of "$HOME/wall.jpg" is stored as the literal 15-character
+# string "$HOME/wall.jpg" and will simply never resolve to a real file. Write
+# absolute paths in full: /home/youruser/wall.jpg
+# Surrounding single or double quotes are stripped; nothing else is interpreted.
 
 # 0 = use feh/fehbg; 1 = use xwallpaper
 USE_XWALLPAPER=1
@@ -9,7 +16,10 @@ USE_XWALLPAPER=1
 # no path argument, so WALL does NOTHING when it is selected (auto-detect prefers
 # fehbg when it is on PATH). xrandrw logs `wallpaper_wall_ignored` when that
 # happens; set WALLPAPER_ENGINE=feh below if you want WALL to be applied.
-WALL="$HOME/Pictures/wallpaper.jpg"
+# Absolute path only -- see the NO SHELL EXPANSION note at the top of this file.
+# Left commented so the built-in default (~/.local/share/wallpapers/space.jpg,
+# resolved correctly in Python) applies until you set a real path of your own.
+# WALL=/home/youruser/Pictures/wallpaper.jpg
 
 # Treat eDP as HiDPI if preferred-mode width >= this
 HIDPI_WIDTH=3200
@@ -22,7 +32,9 @@ POLL_INTERVAL=45
 LOG_LEVEL=notice
 
 # Optional JSON log file (structured logs). Comment out to disable.
-# LOG_FILE="$HOME/.local/state/xrandrw/xrandrw.log"
+# Absolute path only -- $HOME is NOT expanded (see the note at the top).
+# The directory must already exist.
+# LOG_FILE=/home/youruser/.local/state/xrandrw/xrandrw.log
 
 # Default side for new/unknown monitors: right-of|left-of|above|below
 PREF_DEFAULT_SIDE=right-of
@@ -44,19 +56,45 @@ PREF_DEFAULT_SIDE=right-of
 #  extra: pip install xrandrw[wallpaper])
 # WALLPAPER_ENGINE=
 
-# Device profiles: LAYOUT_<NAME> pins an exact layout for a set of connectors.
-# A profile matches when its connectors are all connected, and it overrides the
-# generic placement policy. Grammar (';'-separated outputs, ':'-separated fields):
-#   connector:mode:role:position[:transform]
-# role is 'primary' or 'secondary'; position is an absolute XxY offset.
+# Device profiles: LAYOUT_<NAME> pins an exact layout for a set of connectors,
+# overriding the generic placement policy.
+#
+# MATCHING IS EXACT SET EQUALITY: a profile fires only when the set of connected
+# connectors EQUALS its own set -- not when it is merely a subset of them. So a
+# LAYOUT_SOLO naming only DSI-1 does NOT fire while DSI-1 + HDMI-1 are both
+# connected; you need a separate two-connector profile for that case (or none,
+# to fall back to the generic policy). Subset matching was removed deliberately
+# (WR-05): it let a {DSI-1} profile win with {DSI-1,HDMI-1} connected and then
+# left HDMI-1 entirely unconfigured -- a black second screen.
+# If two profiles name the identical connector set, the alphabetically-first
+# LAYOUT_ name wins (LAYOUT_ABLE beats LAYOUT_ZED), so ties are deterministic
+# rather than dependent on config order.
+#
+# Grammar (';'-separated outputs, ':'-separated fields):
+#   connector:mode:role:position[:transform...]
+#   mode     -- an xrandr mode like 1920x1080, or the literal 'auto' for --auto
+#   role     -- 'primary' or 'secondary'
+#   position -- either an absolute offset  XxY            (e.g. 1600x0)
+#               or a relative anchor       side=CONNECTOR (e.g. right-of=DSI-1)
+#               where side is left-of|right-of|above|below
+#   transform (optional, repeatable) -- scale=WxH or rotate=left|right|inverted|normal
+#
+# A malformed LAYOUT_ line is skipped with a log line, never a crash.
 #
 # Pi4 users: uncomment to reproduce the pre-Phase-5 hardcoded DSI-1/HDMI-1 layout.
 # LAYOUT_PI4="DSI-1:800x480:primary:1600x0;HDMI-1:1600x900:secondary:0x0"
+#
+# Same two heads, expressed relatively instead of with absolute offsets:
+# LAYOUT_PI4="DSI-1:800x480:primary:0x0;HDMI-1:1600x900:secondary:right-of=DSI-1"
+#
+# Laptop + external, external above the panel, panel rotated:
+# LAYOUT_DESK="eDP-1:auto:primary:0x0:rotate=normal;HDMI-1:2560x1440:secondary:above=eDP-1"
 
 # Window management (dwm-ipc). Opt-in, default off.
 # When enabled, on display UNPLUG xrandrw relocates the removed display's windows
 # onto a surviving display and, on REPLUG, moves the SAME process's window back
-# where it was — keyed by PID (Apple-like relocate-on-unplug / restore-on-replug).
+# where it was -- keyed by (pid, starttime) from /proc, not PID alone, so a recycled
+# PID is never mistaken for the original (Apple-like relocate/restore on unplug/replug).
 # REQUIRES a dwm built with the mihirlad55/dwm-ipc patch exposing /tmp/dwm.sock.
 # On any window manager WITHOUT that IPC endpoint (vanilla dwm / RPi4, i3) the
 # feature is SILENTLY capability-gated OFF: no dwm-ipc call is issued and no window

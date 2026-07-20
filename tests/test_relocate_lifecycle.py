@@ -359,7 +359,16 @@ def test_one_window_failure_isolated(tmp_path, monkeypatch, logger):
         coord.on_settled({}, logger)
         assert (PID_A, ST_A) in coord._displaced and (PID_B, ST_B) in coord._displaced
 
-        # B's live client read raises for one window only (per-window DwmIpcUnavailable).
+        # B's live client read raises for one window only (per-window
+        # DwmIpcUnavailable) -- and B is gone from dwm's client list too, which is
+        # what an unreadable window actually means. B-1: the crash guard now
+        # resolves EVERY listed client to learn its tags/floating state, so a
+        # window that is both listed AND unresolvable makes the guard fail safe
+        # for the whole monitor (covered by
+        # test_unresolvable_client_fails_safe_blocks). Removing B from the server
+        # keeps this test on its actual subject: one window's failure must not
+        # stop the OTHER window from being restored.
+        srv.remove(B)
         orig_get = dwmipc.get_dwm_client
 
         def get_spy(win, path=None, **kw):
@@ -434,7 +443,16 @@ def test_tagmon_skipped_when_move_would_empty_source_monitor(tmp_path, monkeypat
     sock = tmp_path / "dwm.sock"
     # ONLY the displaced window exists on the surviving monitor -> a restore
     # tagmon would empty it. NO anchor here on purpose: this is the crash case.
-    clients = [_client(A, 4, 1, GA, True)]
+    #
+    # B-1: the window must be TILED for this to BE the crash case. dwm's tile()
+    # counts `n` via nexttiled, which skips floating clients -- so a lone FLOATING
+    # window landing on an empty monitor gives n == 0 there and n == 0 on the
+    # emptied source, the `if (n == 1 && selmon->sel->CenterThisWindow)` branch is
+    # never taken, and nothing is dereferenced. That move is SAFE and the
+    # float-aware guard now correctly allows it (see
+    # test_lone_floating_window_to_empty_monitor_is_allowed). A TILED window
+    # lands at n == 1 on the destination while selmon->sel is NULL: the SIGSEGV.
+    clients = [_client(A, 4, 1, GA, False)]
     with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
         outs = _make_outputs()
         control = MockControl(srv, events)
@@ -936,7 +954,7 @@ def test_dwm_rejection_is_surfaced_not_silently_swallowed(
 
         monkeypatch.setattr(relocate.dwmipc, "run_command", rejecting_run)
         _replug(outs, "DP-2")
-        with caplog.at_level(logging.WARNING, logger="xrandrw"):
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
             coord.on_settled({}, logger)
 
         rejected = [r for r in caplog.records
@@ -944,7 +962,238 @@ def test_dwm_rejection_is_surfaced_not_silently_swallowed(
         assert rejected, "a dwm-side rejection must be logged, not pass as success"
         assert rejected[0].verb == "tag"
         assert rejected[0].reason == "Type mismatch"
-        # WM-08 stands: the rejection is NOT fatal. The window still reached its
-        # target monitor via the (accepted) tagmon, and the record still dropped.
+        # WM-08 stands: the rejection is NOT fatal to the CYCLE -- the window still
+        # reached its target monitor via the (accepted) tagmon and nothing raised.
+        assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
+        # B-3: but `tag` is ESSENTIAL -- A is on the right monitor carrying the
+        # WRONG TAGS, so it is NOT restored. The record must SURVIVE for a later
+        # cycle to retry, and the daemon must not claim a restore it did not do.
+        # (This assertion previously read `not in coord._displaced`: it encoded
+        # the defect, because _restore_one discarded _run_verb's bool and dropped
+        # the record while logging success.)
+        assert (PID_A, ST_A) in coord._displaced
+        events_logged = [getattr(r, "event", None) for r in caplog.records]
+        assert "relocate_restore" not in events_logged, \
+            "a window whose essential verb was rejected must not log a restore"
+        assert "relocate_restore_incomplete" in events_logged
+
+
+def test_all_verbs_rejected_keeps_record_and_logs_no_restore(
+        tmp_path, monkeypatch, logger, caplog):
+    """B-3: when dwm rejects EVERY verb, nothing was restored -- say so, keep the record.
+
+    The pre-fix code discarded ``_run_verb``'s bool on the restore path
+    (``_restore_one`` tag/togglefloating, ``_tagmon_to_target`` tagmon; only
+    ``_focusmon_to`` acted on it). With every command refused it still fell
+    through to ``logev(... "relocate_restore", "restored displaced window")`` and
+    returned "drop", DELETING the record: the window sat exactly where dwm's
+    evacuation left it, the daemon logged a success, and because the record was
+    gone no later cycle ever retried. This pins the corrected outcome.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    _install_common(monkeypatch, events)
+    orig_run = dwmipc.run_command
+    sock = tmp_path / "dwm.sock"
+
+    def reject_everything(name, *args, **kw):
+        events.append(("cmd", name, args))
+        return {"result": "error", "reason": f"Command {name} not found"}
+
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=MockControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)      # dwm evacuates A: monitor 1 -> 0
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        monkeypatch.setattr(relocate.dwmipc, "run_command", reject_everything)
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # Nothing took effect: A is still where dwm's evacuation left it.
+        assert srv.state(A)["monitor_number"] == 0
+
+        events_logged = [getattr(r, "event", None) for r in caplog.records]
+        # THE CORE OF B-3: no success log, and the record SURVIVES so a later
+        # replug cycle retries the window instead of silently losing it.
+        assert "relocate_restore" not in events_logged, \
+            "every verb was rejected -- the daemon must not log a restore"
+        assert "relocate_restore_incomplete" in events_logged
+        assert (PID_A, ST_A) in coord._displaced, \
+            "a wholly-rejected restore must LEAVE the record for a later retry"
+
+        # And a later cycle really does retry it: with dwm accepting again, the
+        # same record restores and only THEN drops.
+        monkeypatch.setattr(relocate.dwmipc, "run_command", orig_run)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        _replug(outs, "DP-2")
+        coord.on_settled({}, logger)
         assert _wait_for(lambda: srv.state(A)["monitor_number"] == 1)
         assert (PID_A, ST_A) not in coord._displaced
+
+
+class StockDwmControl:
+    """A control whose ``focus()`` sends the ClientMessage but does NOT focus.
+
+    This is STOCK dwm. Its ``clientmessage`` handles ``_NET_ACTIVE_WINDOW`` with
+    ``seturgent(c, 1)`` -- it flags urgency and never touches the selection. Every
+    other control in this suite bridges ``focus -> srv.select`` because the
+    functional harness dwm carries a ``focusonnetactive`` patch
+    (``tests/functional/dwm/dwm-ipc.diff``) added SPECIFICALLY so relocate's
+    focus-then-act works. That patch is why B-4 went unnoticed: the whole test
+    corpus modelled a patched dwm, so nothing could reproduce a PyPI user's
+    stock install.
+    """
+
+    def __init__(self, srv, events):
+        self.srv = srv
+        self.events = events
+
+    def focus(self, xid):
+        self.events.append(("focus", xid))
+        return True          # the send succeeded; dwm just ignored it
+
+    def configure_geometry(self, xid, geom):
+        self.srv.set_geometry(xid, geom)
+        self.events.append(("configure", xid))
+        return True
+
+
+def test_unconfirmed_focus_sends_no_mutating_verb(tmp_path, monkeypatch, logger, caplog):
+    """B-4: on a dwm that does not focus on _NET_ACTIVE_WINDOW, issue NOTHING.
+
+    Pre-fix, `_focus_and_confirm` logged `relocate_focus_unconfirmed` and
+    PROCEEDED BEST-EFFORT, so tag/tagmon/togglefloating were fired at whatever dwm
+    actually had selected -- on a stock install, the USER'S OWN WINDOW, silently
+    retagged and dragged to another monitor on every single replug.
+
+    Here ANCHOR is the user's focused window and A is the displaced one. The
+    control models stock dwm (the ClientMessage lands, the selection does not
+    move), so dwm keeps reporting ANCHOR as selected. The restore must issue NO
+    mutating verb at all, must not touch ANCHOR, and must keep A displaced.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        coord = relocate.RelocationCoordinator(
+            control=StockDwmControl(srv, events), reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        coord.on_settled({}, logger)
+        _evacuate(orig_run, srv, sock, A)        # dwm evacuates A: monitor 1 -> 0
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # THE USER refocuses their own window -- and stock dwm will keep it
+        # selected no matter how many _NET_ACTIVE_WINDOW messages we send.
+        srv.select(ANCHOR)
+        anchor_before = srv.state(ANCHOR)
+        events.clear()
+        _replug(outs, "DP-2")
+        with caplog.at_level(logging.INFO, logger="xrandrw"):
+            coord.on_settled({}, logger)
+
+        # 1. NOT ONE mutating verb was sent.
+        mutating = [e for e in events
+                    if e[0] == "cmd" and e[1] in ("tag", "tagmon", "togglefloating")]
+        assert mutating == [], f"unconfirmed focus must issue no verb, sent: {mutating}"
+
+        # 2. The user's window is exactly as they left it -- same monitor, same
+        #    tags, same floating state. This is the damage the bug did.
+        assert srv.state(ANCHOR) == anchor_before
+
+        # 3. The displaced window was left alone, and the record survives (B-3),
+        #    so the restore retries if the user later switches to a dwm that
+        #    honours _NET_ACTIVE_WINDOW.
+        assert srv.state(A)["monitor_number"] == 0
+        assert (PID_A, ST_A) in coord._displaced
+
+        # 4. And it said so, loudly.
+        logged = [getattr(r, "event", None) for r in caplog.records]
+        assert "relocate_focus_unconfirmed" in logged
+        assert "relocate_restore" not in logged
+
+
+class CountingControl(MockControl):
+    """MockControl that COUNTS focus calls (mirrors test_regression_no_ipc)."""
+
+    def __init__(self, srv, events):
+        super().__init__(srv, events)
+        self.focus_calls = 0
+
+    def focus(self, xid):
+        self.focus_calls += 1
+        return super().focus(xid)
+
+
+def test_cycle_that_stole_no_focus_does_not_restore_focus(tmp_path, monkeypatch, logger):
+    """6b: a cycle that took NO focus must not hand any back.
+
+    `_restore_returned` guards the end-of-cycle focus give-back with
+    `if self._focus_calls > focus_calls_at_entry`. That gate had NO test at all --
+    replacing it with `if True:` left the suite fully green, and nothing in
+    tests/ so much as referenced `_focus_calls`.
+
+    What the gate prevents: a cycle where every displaced record is dropped on a
+    STALE IDENTITY issues no control call whatsoever (spike 004's hard rule --
+    never touch a reused PID's window). Without the gate such a cycle would still
+    call `_restore_focus`, yanking the selection to the snapshot's window. A
+    daemon that "restores" focus it never stole IS a gratuitous focus change --
+    precisely the churn UX-01 exists to remove.
+    """
+    proc_root = _make_proc(tmp_path, [(PID_A, "a", ST_A)])
+    events = []
+    orig_run = _install_common(monkeypatch, events)
+    sock = tmp_path / "dwm.sock"
+    clients = [_client(A, 4, 1, GA, True), _client(ANCHOR, 1, 0, GB, False)]
+    with FakeDwmServer(sock, mode="stateful", clients=clients) as srv:
+        outs = _make_outputs()
+        control = CountingControl(srv, events)
+        coord = relocate.RelocationCoordinator(
+            control=control, reader=FakeRandr(outs),
+            xreader=_fake_xreader({A: PID_A}),
+            sock_path=str(sock), proc_root=proc_root)
+
+        # The user's own window is selected at the STEADY settle, so the snapshot
+        # captures a real focus -- there IS something the daemon could wrongly
+        # hand back, which is what makes this test able to fail.
+        srv.select(ANCHOR)
+        coord.on_settled({}, logger)
+        assert coord._snapshot_focus == (0, ANCHOR)
+
+        _evacuate(orig_run, srv, sock, A)
+        _unplug(outs, "DP-2")
+        coord.on_settled({}, logger)
+        assert (PID_A, ST_A) in coord._displaced
+
+        # PID_A is REUSED by a different process: same pid, new starttime. Every
+        # displaced record now fails identity and is dropped WITHOUT any control
+        # call, so this cycle steals nothing.
+        _rewrite_starttime(tmp_path, PID_A, "a", ST_A + 999)
+
+        control.focus_calls = 0
+        events.clear()
+        _replug(outs, "DP-2")
+        coord.on_settled({}, logger)
+
+        assert (PID_A, ST_A) not in coord._displaced   # dropped on stale identity
+        assert control.focus_calls == 0, \
+            "a cycle that stole no focus must not issue a focus change of its own"
+        assert not any(e[0] == "cmd" for e in events), \
+            "a stale-identity drop must issue no dwm command at all"

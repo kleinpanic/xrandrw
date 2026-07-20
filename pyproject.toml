@@ -7,7 +7,11 @@ name = "xrandrw"
 version = "0.2.0"
 description = "Robust, zero-config X11 display hotplug policy daemon for dwm/i3"
 readme = "README.md"
-requires-python = ">=3.7"
+# 3.9 is the real floor, not an aspiration: logging_utils.py uses shlex.join
+# (3.8+), CI tests 3.9/3.11/3.13, and [tool.ruff] target-version is py39.
+# Declaring >=3.7 let a 3.7 install succeed and then crash on the first
+# LOG_LEVEL=debug command. Untested support is worse than no support.
+requires-python = ">=3.9"
 license = "MIT"
 authors = [{ name = "Klein Panic" }]
 keywords = ["xrandr", "x11", "display", "hotplug", "systemd", "dwm"]
@@ -15,6 +19,15 @@ classifiers = [
   "Environment :: X11 Applications",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
+  # Per-version classifiers matching requires-python = ">=3.9". Without these
+  # PyPI's sidebar shows only a bare "3" and gives no signal about the supported
+  # range. 3.9/3.11/3.13 are exercised directly by the CI test matrix; 3.10 and
+  # 3.12 are claimed as in-range between tested versions.
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Desktop Environment :: Window Managers",
 ]
 dependencies = ["python-xlib>=0.31"]

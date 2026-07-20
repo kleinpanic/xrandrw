@@ -58,6 +58,14 @@ _LOG = logging.getLogger("xrandrw")
 _FOCUS_CONFIRM_TRIES = 6
 _FOCUS_CONFIRM_SLEEP = 0.03  # seconds between polls (total budget ~= tries*sleep)
 
+# B-1 crash-guard IPC ceiling. The tag/float-aware guard resolves every client on
+# every monitor via get_dwm_client (get_monitors carries no per-client tags).
+# Measured against the fake server at ~0.034 ms per round-trip, so this ceiling
+# costs ~2 ms per hop -- roughly 1/80th of the focus-confirm budget already spent
+# on the same path. The bound exists so a pathological client count cannot stall
+# the single-threaded watch select() loop; over it, the guard fails SAFE (refuse).
+_GUARD_CLIENT_BUDGET = 64
+
 
 def _selected_confirmed(monitors, xid) -> bool:
     """True iff dwm reports ``xid`` as the selected client of the selected monitor.
@@ -153,6 +161,28 @@ def _all_client_xids(monitors) -> set:
 # coordinator (Plan 03) inserts a focus() before EVERY verb -- focus is NOT an
 # Action here because plan_restore is pure and focus is a live-X side effect.
 Action = namedtuple("Action", "verb args")
+
+# Which restore verbs are ESSENTIAL to calling a window "restored" (B-3).
+#
+# `tagmon` and `tag` are the two that decide WHERE THE USER SEES THE WINDOW: a
+# rejected `tagmon` leaves it on the wrong MONITOR, a rejected `tag` leaves it on
+# a tag the user may not be viewing -- in both cases the window is not back and
+# the record must survive so a later cycle retries. `togglefloating` and
+# `configure` are COSMETIC: the window is on the right monitor and tag, just
+# floating-vs-tiled or positioned differently than it was, which dwm's own
+# layout will render sensibly anyway. Dropping the record on a cosmetic-only
+# failure is correct -- retrying forever for a pixel offset would be churn.
+_ESSENTIAL_VERBS = ("tagmon", "tag")
+
+# Outcome of a focus-then-act step (B-4). ``_STEP_FOCUS_LOST`` is distinct from
+# ``_STEP_FAILED`` because it aborts the WHOLE window rather than just its own
+# step: if dwm never confirms the focus once, it will not confirm it for the next
+# verb either, and each unconfirmed attempt burns the full
+# ``_FOCUS_CONFIRM_TRIES * _FOCUS_CONFIRM_SLEEP`` budget inside the
+# single-threaded watch loop. One budget per window per cycle, not four.
+_STEP_OK = "ok"
+_STEP_FAILED = "failed"
+_STEP_FOCUS_LOST = "focus_lost"
 
 
 def _safe_close(d) -> None:
@@ -279,6 +309,72 @@ def to_monitor_relative_geometry(geometry, origin) -> dict[str, int]:
         "width": int(geometry["width"]),
         "height": int(geometry["height"]),
     }
+
+# One monitor's crash-relevant state, normalised out of the IPC replies (B-1).
+# ``tagset`` is dwm's CURRENT tagset bitmask (``mon->tagset[mon->seltags]``);
+# ``clients`` is a list of :data:`ClientState` in ``mon->clients`` order.
+MonitorState = namedtuple("MonitorState", "num tagset clients")
+ClientState = namedtuple("ClientState", "xid tags floating")
+
+
+def _visible(client, tagset) -> bool:
+    """dwm's ``ISVISIBLE``: ``c->tags & c->mon->tagset[c->mon->seltags]``."""
+    return bool(client.tags & tagset)
+
+
+def _tiled_count(clients, tagset, exclude=None) -> int:
+    """dwm's ``tile()`` ``n``: clients reached by ``nexttiled`` over ``mon->clients``.
+
+    ``nexttiled`` SKIPS ``c->isfloating || !ISVISIBLE(c)``, so a floating client
+    and an off-tag client both contribute ZERO -- which is the whole of B-1.
+    """
+    return sum(1 for c in clients
+               if c.xid != exclude and _visible(c, tagset) and not c.floating)
+
+
+def _visible_count(clients, tagset, exclude=None) -> int:
+    """Clients dwm's ``focus(NULL)`` could land on: VISIBLE, floating included."""
+    return sum(1 for c in clients if c.xid != exclude and _visible(c, tagset))
+
+
+def tagmon_crash_risk(mons, xid, direction) -> bool:
+    """PURE crash predicate for one ``tagmon`` hop. True == UNSAFE (block).
+
+    ``mons`` is a list of :data:`MonitorState`. Models dwm's ``sendmon`` exactly
+    (see :meth:`RelocationCoordinator._tagmon_would_crash_dwm` for the full crash
+    derivation and why each half needs a DIFFERENT client predicate):
+
+      * the moved client leaves the source and joins ``dirtomon(source,
+        direction)``, and ``sendmon`` assigns it the DESTINATION's current tagset
+        (``c->tags = m->tagset[m->seltags]``) -- so it is always VISIBLE there,
+        and counts toward the destination's tiled ``n`` unless it is FLOATING;
+      * ``source_emptied`` is ``focus(NULL)`` finding no VISIBLE client left on
+        the source (floating clients ARE focusable, so they count here);
+      * ``any_singleton`` is some monitor's ``tile()`` ``n`` landing at exactly 1,
+        where ``n`` counts only VISIBLE, NON-FLOATING clients.
+
+    Returns True iff BOTH hold. Fails safe (True) on an unresolved
+    source/destination or fewer than two monitors. PURE: no I/O.
+    """
+    index = {m.num: m for m in mons}
+    n = len(mons)
+    source = next((m for m in mons if any(c.xid == xid for c in m.clients)), None)
+    if source is None or n < 2:
+        return True
+    moved = next(c for c in source.clients if c.xid == xid)
+    # dirtomon(source, direction): next/previous monitor by num, wrapping. dwm
+    # assigns num sequentially (0..n-1) and tagmon walks that ring.
+    dest = index.get((source.num + (1 if direction > 0 else -1)) % n)
+    if dest is None:
+        return True
+    # (a) focus(NULL) -> selmon->sel == NULL: no VISIBLE client left on the source.
+    source_emptied = _visible_count(source.clients, source.tagset, exclude=xid) == 0
+    # (b) some monitor at tile() n == 1 during the post-move arrange(NULL).
+    post_tiled = {m.num: _tiled_count(m.clients, m.tagset) for m in mons}
+    post_tiled[source.num] = _tiled_count(source.clients, source.tagset, exclude=xid)
+    post_tiled[dest.num] = _tiled_count(dest.clients, dest.tagset) + (0 if moved.floating else 1)
+    return source_emptied and any(c == 1 for c in post_tiled.values())
+
 
 def tagmon_direction(cur_num: int, target_num: int, n_monitors: int) -> int | None:
     """Return the RELATIVE tagmon direction from ``cur_num`` to ``target_num``, or None.
@@ -657,6 +753,10 @@ class RelocationCoordinator:
             if result == "drop":
                 del self._displaced[key]
                 dropped += 1
+            else:
+                # "keep" (B-3): an essential step did not take effect, so the
+                # record stays displaced for a later cycle to retry.
+                skipped += 1
         if self._focus_calls > focus_calls_at_entry:
             # Only give focus back if this cycle actually took it. Same
             # best-effort contract as every other step: a failure here must never
@@ -737,17 +837,42 @@ class RelocationCoordinator:
               "could not walk the selected monitor back within the hop bound",
               monitor=target_num, reason="focusmon_giveup")
 
-    def _focus_and_confirm(self, xid, logger) -> None:
-        """Focus ``xid`` then POLL until dwm reports it selected (CR-01).
+    def _focus_and_confirm(self, xid, logger) -> bool:
+        """Focus ``xid``, POLL until dwm reports it selected, return WHETHER it did.
 
         The Xlib ``focus()`` seam only sends ``_NET_ACTIVE_WINDOW`` + flush; dwm's
         selection updates asynchronously. This bounded poll of ``get_monitors``
         (threaded with ``ipc_timeout``) closes the focus->verb race so a verb
-        never lands on the previously-selected client. On timeout it logs
-        ``relocate_focus_unconfirmed`` and proceeds best-effort; a transient
-        ``DwmIpcUnavailable`` mid-poll returns early (the caller's next verb will
-        raise and be handled per-window). This lives in the coordinator, not the
-        Xlib seam, because confirming needs an IPC read the seam must not own.
+        never lands on the previously-selected client (CR-01). This lives in the
+        coordinator, not the Xlib seam, because confirming needs an IPC read the
+        seam must not own.
+
+        B-4 -- THE RETURN VALUE IS A SAFETY GATE, NOT A HINT. This used to log
+        ``relocate_focus_unconfirmed`` and PROCEED BEST-EFFORT. That is only safe
+        on a dwm that actually focuses on ``_NET_ACTIVE_WINDOW``:
+
+            STOCK dwm's ``clientmessage`` handles ``NetActiveWindow`` by calling
+            ``seturgent(c, 1)`` -- it flags urgency and does NOT focus.
+
+        The functional harness builds dwm with a ``focusonnetactive`` patch
+        precisely so ``focus()`` works (``tests/functional/dwm/dwm-ipc.diff``), and
+        the developer's own dwm carries it -- which is why this was never caught:
+        the test suite is STRUCTURALLY incapable of reproducing stock behavior.
+        On a stock dwm-ipc install, ``focus()`` no-ops, the poll below burns its
+        whole budget, and every subsequent ``tag``/``tagmon``/``togglefloating``
+        lands on whatever dwm currently has selected -- i.e. THE USER'S OWN
+        WINDOW, silently retagged and moved to another monitor on every replug.
+
+        So an unconfirmed focus now returns False and the caller ABORTS that
+        window's verbs. A window left unmoved is vastly better than the user's
+        focused window being mangled; the feature degrades to a no-op on dwm
+        builds it cannot drive, and self-heals the moment the focus lands.
+
+        (Deliberately NOT a startup probe or a config key: a probe would have to
+        pick some victim window and steal focus at boot to learn the answer, and a
+        config key would make a SAFETY property user-tunable. The per-window gate
+        needs neither -- it is exact, self-healing, and costs one poll budget per
+        window per cycle.)
         """
         self._control.focus(xid)
         self._focus_calls += 1   # UX-01: we just stole the user's focus
@@ -755,69 +880,156 @@ class RelocationCoordinator:
             try:
                 monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
             except dwmipc.DwmIpcUnavailable:
-                return
+                # Cannot confirm -> must not act. Same gate as a timeout.
+                return False
             if _selected_confirmed(monitors, xid):
-                return
+                return True
             time.sleep(_FOCUS_CONFIRM_SLEEP)
-        logev(logger, logging.INFO, "relocate_focus_unconfirmed",
-              "focus selection unconfirmed within budget; proceeding best-effort", xid=xid)
+        logev(logger, logging.WARNING, "relocate_focus_unconfirmed",
+              "dwm never reported this window as selected; ABORTING its restore verbs. "
+              "Issuing tag/tagmon/togglefloating now would act on whatever dwm has "
+              "selected instead -- most likely your own focused window. Stock dwm only "
+              "flags urgency on _NET_ACTIVE_WINDOW and does not focus; window relocation "
+              "requires a dwm built with the focusonnetactive behavior.", xid=xid)
+        return False
+
+    def _resolve_live(self, rec, monitors, conn_to_mon, logger):
+        # Returns the live view `plan_restore` plans against, or None when the
+        # record must be dropped WITHOUT any control call: a dead OR reused-PID
+        # window (identity None/mismatch) is never touched (spike 004 hard rule).
+        identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
+        if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
+            logev(logger, logging.INFO, "relocate_skip_identity",
+                  "displaced window identity stale/reused; leaving untouched",
+                  pid=rec.pid, xid=rec.xid)
+            return None
+        client = dwmipc.get_dwm_client(rec.xid, path=self._path, timeout=self._ipc_timeout)
+        return SimpleNamespace(
+            target_monitor=conn_to_mon.get(rec.output),
+            current_monitor=client["monitor_number"],
+            current_floating=bool(client["states"]["is_floating"]),
+            n_monitors=len(monitors),
+        )
+
+    # Each `_step_*` executes ONE Action and returns (accepted, abort):
+    # `accepted` is whether the step took effect -- the caller sinks the restore
+    # (B-3) only when the verb is ESSENTIAL; `abort` means dwm never confirmed
+    # our focus, so the caller must abandon the REST of this window's verbs (B-4)
+    # rather than fire them at whatever dwm currently has selected.
+    def _step_tagmon(self, rec, action, target, monitors, logger):
+        status = self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
+        return status == _STEP_OK, status == _STEP_FOCUS_LOST
+
+    def _step_tag(self, rec, action, target, monitors, logger):
+        if not self._focus_and_confirm(rec.xid, logger):
+            return False, True   # B-4: a `tag` on the WRONG client is the whole bug
+        return self._run_verb("tag", action.args, logger=logger,
+                              pid=rec.pid, xid=rec.xid), False
+
+    def _step_togglefloating(self, rec, action, target, monitors, logger):
+        if not self._focus_and_confirm(rec.xid, logger):
+            return False, True   # B-4: cosmetic, but never on someone else's window
+        # Cosmetic verb: its acceptance is deliberately not tracked (it is not in
+        # _ESSENTIAL_VERBS, so a rejection must never keep the record alive).
+        self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
+        return True, False
+
+    def _step_configure(self, rec, action, target, monitors, logger):
+        origin = monitor_origin(monitors, target)
+        if origin is None:
+            # WM-08 fail-safe: without the target monitor origin we cannot
+            # convert the absolute captured geometry to the monitor-relative
+            # coords dwm's configurerequest expects, so sending it would land the
+            # window wrong. Skip the geometry restore (monitor/tag/floating
+            # already applied) and log, never guess or crash.
+            logev(logger, logging.WARNING, "relocate_geometry_skip",
+                  "target monitor origin unresolved; skipping floating "
+                  "geometry restore (window kept on target, geometry left "
+                  "as dwm placed it)",
+                  pid=rec.pid, xid=rec.xid, target=target)
+            return True, False
+        rel = to_monitor_relative_geometry(action.args, origin)
+        if not self._focus_and_confirm(rec.xid, logger):
+            # B-4: configure_geometry is XID-targeted, so unlike the verbs it
+            # cannot hit the wrong window -- but an unconfirmed focus means the
+            # preceding steps did not land either, so the window is not on the
+            # monitor this geometry was computed against. Skip rather than shove
+            # it to coordinates that no longer mean anything.
+            return False, True
+        self._control.configure_geometry(rec.xid, rel)
+        return True, False
+
+    def _run_restore_action(self, rec, action, target, monitors, logger):
+        # Dispatch only -- every arm's exceptions stay inside the caller's
+        # per-step guard (WM-08). An unknown verb is a no-op, not a failure.
+        if action.verb == "tagmon":
+            return self._step_tagmon(rec, action, target, monitors, logger)
+        if action.verb == "tag":
+            return self._step_tag(rec, action, target, monitors, logger)
+        if action.verb == "togglefloating":
+            return self._step_togglefloating(rec, action, target, monitors, logger)
+        if action.verb == "configure":
+            return self._step_configure(rec, action, target, monitors, logger)
+        return True, False
 
     def _restore_one(self, rec, monitors, conn_to_mon, logger) -> str:
-        """Restore ONE displaced record; return "drop" (done OR stale identity).
+        """Restore ONE displaced record; return "drop" (finished with it) or "keep".
 
         Re-resolves ``(pid, starttime)``: a dead OR reused-PID window (identity
         None/mismatch) is dropped WITHOUT any control call -- never touch another
         instance (spike 004 hard rule). Otherwise reads the live client, plans the
         restore, and executes each Action focus-then-act, each wrapped so one
         failed step never aborts the window.
+
+        B-3 -- A REJECTED RESTORE NO LONGER LOGS SUCCESS. UX-03 added
+        :meth:`_run_verb` / :func:`_accepted` so a dwm-side rejection is visible,
+        but this method DISCARDED the bool: with every verb rejected it still fell
+        through to log ``relocate_restore`` ("restored displaced window") and
+        return "drop", DELETING the record. The window was never restored, the
+        daemon said it was, and no later cycle retried -- the exact defect WP-01
+        fixed in ``wallpaper.py`` (a discarded returncode letting a failed apply
+        log success), reintroduced one layer up.
+
+        Now every ESSENTIAL verb's acceptance is tracked (:data:`_ESSENTIAL_VERBS`
+        -- ``tagmon``/``tag``, the two that decide where the user SEES the window).
+        A rejected or raised essential step means the record is KEPT in
+        ``_displaced`` and the cycle logs ``relocate_restore_incomplete`` at
+        WARNING instead of ``relocate_restore`` at INFO, so a later replug cycle
+        retries it. Cosmetic steps (``togglefloating``/``configure``) still follow
+        the WM-08 one-failed-step-never-aborts-the-window contract and never keep
+        the record alive on their own.
         """
-        identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
-        if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
-            logev(logger, logging.INFO, "relocate_skip_identity",
-                  "displaced window identity stale/reused; leaving untouched",
-                  pid=rec.pid, xid=rec.xid)
+        live = self._resolve_live(rec, monitors, conn_to_mon, logger)
+        if live is None:
             return "drop"
-        client = dwmipc.get_dwm_client(rec.xid, path=self._path, timeout=self._ipc_timeout)
-        target = conn_to_mon.get(rec.output)
-        live = SimpleNamespace(
-            target_monitor=target,
-            current_monitor=client["monitor_number"],
-            current_floating=bool(client["states"]["is_floating"]),
-            n_monitors=len(monitors),
-        )
+        essential_ok = True
         for action in plan_restore(rec, live):
             try:
-                if action.verb == "tagmon":
-                    self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
-                elif action.verb == "tag":
-                    self._focus_and_confirm(rec.xid, logger)
-                    self._run_verb("tag", action.args, logger=logger, pid=rec.pid, xid=rec.xid)
-                elif action.verb == "togglefloating":
-                    self._focus_and_confirm(rec.xid, logger)
-                    self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
-                elif action.verb == "configure":
-                    origin = monitor_origin(monitors, target)
-                    if origin is None:
-                        # WM-08 fail-safe: without the target monitor origin we
-                        # cannot convert the absolute captured geometry to the
-                        # monitor-relative coords dwm's configurerequest expects,
-                        # so sending it would land the window wrong. Skip the
-                        # geometry restore (monitor/tag/floating already applied)
-                        # and log, never guess or crash.
-                        logev(logger, logging.WARNING, "relocate_geometry_skip",
-                              "target monitor origin unresolved; skipping floating "
-                              "geometry restore (window kept on target, geometry left "
-                              "as dwm placed it)",
-                              pid=rec.pid, xid=rec.xid, target=target)
-                        continue
-                    rel = to_monitor_relative_geometry(action.args, origin)
-                    self._focus_and_confirm(rec.xid, logger)
-                    self._control.configure_geometry(rec.xid, rel)
+                accepted, abort = self._run_restore_action(
+                    rec, action, live.target_monitor, monitors, logger)
             except Exception as e:  # per-step guard is the WM-08 one-failure-never-aborts-window contract
-                # One failed step never aborts the window and never crashes.
+                # One failed step never aborts the window and never crashes -- but
+                # a RAISED essential step is just as much a non-restore as a
+                # REJECTED one, so it must not be reported as success either.
                 logev(logger, logging.WARNING, "relocate_step_fail",
                       "restore step failed; continuing", pid=rec.pid, verb=action.verb, error=str(e))
+                if action.verb in _ESSENTIAL_VERBS:
+                    essential_ok = False
                 continue
+            # B-3: a non-accepted step only sinks the restore when the verb is
+            # ESSENTIAL -- the same membership test the raise path above uses, so
+            # the two ways a step can fail cannot drift apart.
+            if not accepted and action.verb in _ESSENTIAL_VERBS:
+                essential_ok = False
+            if abort:
+                break   # B-4: dwm is not focusing; touch nothing else
+        if not essential_ok:
+            logev(logger, logging.WARNING, "relocate_restore_incomplete",
+                  "an essential restore step (tagmon/tag) did not take effect; the window "
+                  "is NOT back where it was -- keeping the displaced record so a later "
+                  "cycle retries it",
+                  pid=rec.pid, output=rec.output, xid=rec.xid)
+            return "keep"
         logev(logger, logging.INFO, "relocate_restore",
               "restored displaced window", pid=rec.pid, output=rec.output)
         return "drop"
@@ -839,54 +1051,114 @@ class RelocationCoordinator:
         ``cmpl $0x0,0x170(%rdi)``, ``%rdi = selmon->sel = NULL``); precision
         refinement in ``.planning/debug/relocate-guard-precision.md`` (Phase 14).
 
-        The prior guard blocked ANY source-emptying move -- sufficient but not
+        The Phase-10 guard blocked ANY source-emptying move -- sufficient but not
         necessary, so it wrongly refused the last-window-on-external restore where
-        the destination absorbs it and NO monitor lands at ``n == 1`` (provably
-        safe on the faithful canary). This computes the POST-MOVE per-monitor
-        client counts (source-1, dest+1, others unchanged) where the destination
-        is ``dirtomon(source, direction)`` -- the next/previous monitor by ``num``,
-        wrapping -- and returns True (UNSAFE, block) IFF the source becomes 0 AND
-        any monitor would have exactly 1 client. Otherwise False (safe, allow).
+        the destination absorbs it and NO monitor lands at ``n == 1``. Phase 14
+        refined it to the exact two-part condition.
 
-        FAIL SAFE: on ANY IPC failure, malformed reply, an unresolved
-        window/monitor, or fewer than two monitors, we return True (refuse the
-        move) -- a skipped move never crashes dwm; a wrongly-issued one can. The
-        window simply stays where dwm evacuated it (still visible/usable).
+        B-1 -- BUT IT COUNTED THE WRONG CLIENTS, AND ERRED **UNSAFE**. Both halves
+        were computed as ``len(monitor["clients"]["all"])``. Per the dwm-ipc
+        source (``tests/functional/dwm/dwm-ipc.diff``), ``clients.all`` iterates
+        ``mon->clients`` -- EVERY client on the monitor, regardless of tag
+        visibility or floating state. Neither half of the crash predicate is that
+        number:
+
+          * ``source_emptied`` is about ``focus(NULL)``, which walks
+            ``selmon->stack`` for an ``ISVISIBLE`` client. Two clients sitting on
+            a DIFFERENT TAG make ``clients.all`` == 2, so the old guard said "not
+            emptied" -- but ``focus(NULL)`` finds nothing visible and
+            ``selmon->sel`` still goes NULL. Floating clients DO count here: they
+            are visible and focusable.
+          * ``any_singleton`` is about ``tile()``'s ``n``, computed via
+            ``nexttiled``, which SKIPS ``c->isfloating || !ISVISIBLE(c)``. The old
+            guard counted floating and off-tag clients toward ``n == 1``; dwm does
+            not.
+
+        The result was a FALSE NEGATIVE: the gate PERMITTED a move that SIGSEGVs
+        dwm. The 10 tests in ``tests/test_relocate_guard_precision.py`` fed
+        ``clients.all`` lists and so encoded the same wrong model, and the
+        functional harness cannot catch it either -- the harness dwm does not
+        carry the ``CenterThisWindow`` patch at all.
+
+        The counts are now TAG- AND FLOAT-AWARE. ``get_monitors`` alone cannot
+        supply that (its monitor dump has no per-client tags), so each xid is
+        resolved via ``get_dwm_client`` and normalised into
+        :data:`MonitorState`/:data:`ClientState` for the PURE predicate
+        :func:`tagmon_crash_risk`. Measured cost of that resolve is ~0.034 ms per
+        client round-trip, i.e. ~2 ms at the :data:`_GUARD_CLIENT_BUDGET` ceiling
+        of 64 -- an order of magnitude under the focus-confirm poll budget already
+        spent on this same path, and bounded so a pathological client count cannot
+        stall the single-threaded watch loop (above the ceiling we simply refuse).
+
+        This runs AFTER the focus is CONFIRMED (see :meth:`_tagmon_to_target`), so
+        the tagset it reads is the one the tagmon will actually execute against --
+        including any view switch a ``focusonnetactive`` dwm performed to raise
+        the window. Reading before the focus would model a tagset that no longer
+        applies.
+
+        FAIL SAFE: on ANY IPC failure, malformed reply, a missing/ non-int tagset,
+        an unresolved window/monitor, more clients than the budget, or fewer than
+        two monitors, we return True (refuse the move) -- a skipped move never
+        crashes dwm; a wrongly-issued one can. The window simply stays where dwm
+        evacuated it (still visible/usable).
         """
         try:
             monitors = dwmipc.get_monitors(path=self._path, timeout=self._ipc_timeout)
+            mons = self._read_monitor_states(monitors)
         except dwmipc.DwmIpcUnavailable:
             return True
-        wid = int(xid)
-        counts: dict[int, int] = {}
-        source_num: int | None = None
+        if mons is None:
+            logev(logger, logging.WARNING, "relocate_guard_unresolved",
+                  "could not resolve per-client tags/floating state for the crash "
+                  "guard; refusing the tagmon rather than guessing",
+                  xid=xid)
+            return True
+        return tagmon_crash_risk(mons, int(xid), direction)
+
+    def _read_monitor_states(self, monitors):
+        """Normalise ``get_monitors`` + per-client ``get_dwm_client`` into MonitorStates.
+
+        Returns None on ANY shape problem or over-budget client count so the
+        caller fails safe. Raises only :class:`dwmipc.DwmIpcUnavailable`, which
+        the caller also treats as fail-safe.
+        """
+        total = 0
         for m in monitors:
-            num = m.get("num")
             clients = m.get("clients")
             allc = clients.get("all") if isinstance(clients, dict) else None
-            if not isinstance(num, int) or not isinstance(allc, list):
-                return True  # malformed monitor reply -> fail safe
-            counts[num] = len(allc)
-            if wid in allc:
-                source_num = num
-        n = len(monitors)
-        if source_num is None or n < 2:
-            return True  # window not found on any monitor / no destination -> fail safe
-        # dirtomon(source, direction): next/previous monitor by num, wrapping. dwm
-        # assigns num sequentially (0..n-1) and tagmon walks that ring, so the
-        # relative hop lands on (source_num +/- 1) mod n (mirrors tagmon_direction).
-        dest_num = (source_num + (1 if direction > 0 else -1)) % n
-        if dest_num not in counts:
-            return True  # destination monitor unresolved -> fail safe
-        post = dict(counts)
-        post[source_num] -= 1
-        post[dest_num] += 1
-        source_emptied = post[source_num] == 0
-        any_singleton = any(c == 1 for c in post.values())
-        return source_emptied and any_singleton
+            if not isinstance(m.get("num"), int) or not isinstance(allc, list):
+                return None
+            total += len(allc)
+        if total > _GUARD_CLIENT_BUDGET:
+            return None
+        mons = []
+        for m in monitors:
+            tagset = (m.get("tagset") or {}).get("current")
+            if not isinstance(tagset, int):
+                return None   # no tagset -> visibility unknowable -> fail safe
+            states = []
+            for cx in m["clients"]["all"]:
+                if not isinstance(cx, int):
+                    return None
+                c = dwmipc.get_dwm_client(cx, path=self._path, timeout=self._ipc_timeout)
+                tags = c.get("tags")
+                floating = (c.get("states") or {}).get("is_floating")
+                if not isinstance(tags, int):
+                    return None
+                states.append(ClientState(cx, tags, bool(floating)))
+            mons.append(MonitorState(m["num"], tagset, states))
+        return mons
 
-    def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> None:
+    def _tagmon_to_target(self, rec, direction, target, n_monitors, logger) -> str:
         """Bounded focus-then-tagmon loop: at most ``n_monitors`` hops.
+
+        Returns :data:`_STEP_OK` IFF the window is confirmed ON ``target``;
+        :data:`_STEP_FOCUS_LOST` when dwm never confirmed the focus (B-4 -- the
+        caller must abandon the whole window, not just this verb); and
+        :data:`_STEP_FAILED` for every other non-arrival (crash-guard skip, dwm
+        rejection, hop-bound giveup). ``tagmon`` is an ESSENTIAL verb (B-3): any
+        non-OK keeps the displaced record so a later cycle retries, instead of
+        reporting a restore that did not happen.
 
         Focus precedes EVERY hop (selection drifts), re-reads ``monitor_number``
         after each ``tagmon`` and stops on match; on no-match after the bound logs
@@ -905,20 +1177,36 @@ class RelocationCoordinator:
         toward the target.
         """
         for _ in range(n_monitors):
+            if not self._focus_and_confirm(rec.xid, logger):
+                # B-4: dwm did not select our window, so `tagmon` would move
+                # WHATEVER IS SELECTED -- on a stock (non-focusonnetactive) dwm
+                # that is the user's own window, dragged to another monitor.
+                return _STEP_FOCUS_LOST
+            # B-1: the crash guard reads state AFTER the focus is confirmed, not
+            # before. dwm's focus can switch the source monitor's VIEW to raise an
+            # off-tag window (focusonnetactive), which changes exactly the
+            # visibility the guard reasons about -- so a pre-focus read would
+            # evaluate a tagset the tagmon never executes against. Post-focus, the
+            # window is provably visible and selected on its monitor, which is the
+            # state sendmon will actually see.
             if self._tagmon_would_crash_dwm(rec.xid, direction, logger):
                 logev(logger, logging.WARNING, "relocate_tagmon_unsafe",
-                      "skipping tagmon: move would empty the source monitor while "
-                      "leaving a monitor at a single client and can crash dwm builds "
-                      "with the single-window-center patch; leaving window on its "
-                      "current monitor",
+                      "skipping tagmon: move would leave the source monitor with no "
+                      "VISIBLE client while some monitor is left at a single TILED "
+                      "client, which can crash dwm builds with the single-window-center "
+                      "patch; leaving window on its current monitor",
                       pid=rec.pid, xid=rec.xid, target=target)
-                return
-            self._focus_and_confirm(rec.xid, logger)
-            self._run_verb("tagmon", direction, logger=logger, pid=rec.pid, xid=rec.xid)
+                return _STEP_FAILED
+            if not self._run_verb("tagmon", direction, logger=logger,
+                                  pid=rec.pid, xid=rec.xid):
+                # dwm would reject every subsequent identical hop the same way;
+                # the window has not moved, so this is a non-arrival (B-3).
+                return _STEP_FAILED
             cur = dwmipc.get_dwm_client(rec.xid, path=self._path,
                                         timeout=self._ipc_timeout)["monitor_number"]
             if cur == target:
-                return
+                return _STEP_OK
         logev(logger, logging.WARNING, "relocate_monitor_giveup",
               "tagmon did not reach target monitor within bound; leaving as-is",
               pid=rec.pid, target=target)
+        return _STEP_FAILED

@@ -16,23 +16,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Gate on the L3 live-hardware verify stamp
-        # TEST-05/CD-03: the window-management relocate/restore path can only be
-        # proven by a REAL physical unplug/replug against a REAL dwm -- no CI
-        # runner can flip a connector's hotplug-detect bit, and `xrandr --off`
-        # does NOT simulate it (HPD stays connected, so the daemon just re-lights
-        # the head inside one apply). The committed stamp is the record that a
-        # human ran that verification against this codebase. Two live attempts
-        # FAILED before the fix landed, so this gate is not ceremony: without it
-        # a release could ship a relocate path no one ever exercised on metal.
-        run: |
-          test -f tests/functional/L3_PASS.stamp || {
-            echo "::error::tests/functional/L3_PASS.stamp is missing -- the live" \
-                 "2-monitor hardware verify has not been recorded for this release." >&2
-            exit 1
-          }
-          echo "L3 live-verify stamp present:"
-          sed -n '1,8p' tests/functional/L3_PASS.stamp
+        with:
+          # REQUIRED by the stamp gate below: it does ancestry (`merge-base
+          # --is-ancestor`) and diff checks against the stamped commit, which a
+          # shallow clone cannot see. Do not lower this.
+          fetch-depth: 0
+      - name: Gate on the L3 live-hardware verify stamp (freshness, not existence)
+        # TEST-05/CD-03. This gate used to be `test -f <stamp>` -- existence only.
+        # That is worse than no gate: it passes forever, on any future commit, no
+        # matter how far the code has drifted from what was actually verified on
+        # hardware. ci/check_l3_stamp.sh replaces it with a real freshness check
+        # (release-version match, ancestry, and src/xrandrw/ drift, with a
+        # sha-pinned human waiver as the only escape hatch). The full rationale
+        # and the drift policy live in that script's header.
+        run: ci/check_l3_stamp.sh
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"

@@ -75,6 +75,25 @@ def frozen_pi4_argv() -> list:
 
 
 @pytest.fixture
+def layout_relative() -> str:
+    # Exercises the half of the grammar the absolute-position fixtures never touch:
+    # a relative anchor plus BOTH transforms, on an auto-mode head.
+    return "eDP-1:auto:primary:0x0;HDMI-1:auto:secondary:right-of=eDP-1:rotate=left:scale=2x2"
+
+
+@pytest.fixture
+def frozen_relative_argv() -> list:
+    # Same contract as frozen_pi4_argv: byte-exact argv, so a wrong flag, a swapped
+    # side/anchor, or a silently-dropped transform cannot pass. Do not redefine elsewhere.
+    return [
+        "xrandr",
+        "--output", "eDP-1", "--primary", "--auto", "--pos", "0x0", "--scale", "1x1",
+        "--output", "HDMI-1", "--auto", "--right-of", "eDP-1", "--scale", "2x2",
+        "--rotate", "left",
+    ]
+
+
+@pytest.fixture
 def state_path(tmp_path):
     return tmp_path / "state.json"
 
