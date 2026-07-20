@@ -893,6 +893,85 @@ class RelocationCoordinator:
               "requires a dwm built with the focusonnetactive behavior.", xid=xid)
         return False
 
+    def _resolve_live(self, rec, monitors, conn_to_mon, logger):
+        # Returns the live view `plan_restore` plans against, or None when the
+        # record must be dropped WITHOUT any control call: a dead OR reused-PID
+        # window (identity None/mismatch) is never touched (spike 004 hard rule).
+        identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
+        if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
+            logev(logger, logging.INFO, "relocate_skip_identity",
+                  "displaced window identity stale/reused; leaving untouched",
+                  pid=rec.pid, xid=rec.xid)
+            return None
+        client = dwmipc.get_dwm_client(rec.xid, path=self._path, timeout=self._ipc_timeout)
+        return SimpleNamespace(
+            target_monitor=conn_to_mon.get(rec.output),
+            current_monitor=client["monitor_number"],
+            current_floating=bool(client["states"]["is_floating"]),
+            n_monitors=len(monitors),
+        )
+
+    # Each `_step_*` executes ONE Action and returns (accepted, abort):
+    # `accepted` is whether the step took effect -- the caller sinks the restore
+    # (B-3) only when the verb is ESSENTIAL; `abort` means dwm never confirmed
+    # our focus, so the caller must abandon the REST of this window's verbs (B-4)
+    # rather than fire them at whatever dwm currently has selected.
+    def _step_tagmon(self, rec, action, target, monitors, logger):
+        status = self._tagmon_to_target(rec, action.args, target, len(monitors), logger)
+        return status == _STEP_OK, status == _STEP_FOCUS_LOST
+
+    def _step_tag(self, rec, action, target, monitors, logger):
+        if not self._focus_and_confirm(rec.xid, logger):
+            return False, True   # B-4: a `tag` on the WRONG client is the whole bug
+        return self._run_verb("tag", action.args, logger=logger,
+                              pid=rec.pid, xid=rec.xid), False
+
+    def _step_togglefloating(self, rec, action, target, monitors, logger):
+        if not self._focus_and_confirm(rec.xid, logger):
+            return False, True   # B-4: cosmetic, but never on someone else's window
+        # Cosmetic verb: its acceptance is deliberately not tracked (it is not in
+        # _ESSENTIAL_VERBS, so a rejection must never keep the record alive).
+        self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
+        return True, False
+
+    def _step_configure(self, rec, action, target, monitors, logger):
+        origin = monitor_origin(monitors, target)
+        if origin is None:
+            # WM-08 fail-safe: without the target monitor origin we cannot
+            # convert the absolute captured geometry to the monitor-relative
+            # coords dwm's configurerequest expects, so sending it would land the
+            # window wrong. Skip the geometry restore (monitor/tag/floating
+            # already applied) and log, never guess or crash.
+            logev(logger, logging.WARNING, "relocate_geometry_skip",
+                  "target monitor origin unresolved; skipping floating "
+                  "geometry restore (window kept on target, geometry left "
+                  "as dwm placed it)",
+                  pid=rec.pid, xid=rec.xid, target=target)
+            return True, False
+        rel = to_monitor_relative_geometry(action.args, origin)
+        if not self._focus_and_confirm(rec.xid, logger):
+            # B-4: configure_geometry is XID-targeted, so unlike the verbs it
+            # cannot hit the wrong window -- but an unconfirmed focus means the
+            # preceding steps did not land either, so the window is not on the
+            # monitor this geometry was computed against. Skip rather than shove
+            # it to coordinates that no longer mean anything.
+            return False, True
+        self._control.configure_geometry(rec.xid, rel)
+        return True, False
+
+    def _run_restore_action(self, rec, action, target, monitors, logger):
+        # Dispatch only -- every arm's exceptions stay inside the caller's
+        # per-step guard (WM-08). An unknown verb is a no-op, not a failure.
+        if action.verb == "tagmon":
+            return self._step_tagmon(rec, action, target, monitors, logger)
+        if action.verb == "tag":
+            return self._step_tag(rec, action, target, monitors, logger)
+        if action.verb == "togglefloating":
+            return self._step_togglefloating(rec, action, target, monitors, logger)
+        if action.verb == "configure":
+            return self._step_configure(rec, action, target, monitors, logger)
+        return True, False
+
     def _restore_one(self, rec, monitors, conn_to_mon, logger) -> str:
         """Restore ONE displaced record; return "drop" (finished with it) or "keep".
 
@@ -920,66 +999,14 @@ class RelocationCoordinator:
         the WM-08 one-failed-step-never-aborts-the-window contract and never keep
         the record alive on their own.
         """
-        identity = resolve_pid(rec.xid, self._xreader, proc_root=self._proc_root, logger=logger)
-        if identity is None or (identity[0], identity[1]) != (rec.pid, rec.starttime):
-            logev(logger, logging.INFO, "relocate_skip_identity",
-                  "displaced window identity stale/reused; leaving untouched",
-                  pid=rec.pid, xid=rec.xid)
+        live = self._resolve_live(rec, monitors, conn_to_mon, logger)
+        if live is None:
             return "drop"
-        client = dwmipc.get_dwm_client(rec.xid, path=self._path, timeout=self._ipc_timeout)
-        target = conn_to_mon.get(rec.output)
-        live = SimpleNamespace(
-            target_monitor=target,
-            current_monitor=client["monitor_number"],
-            current_floating=bool(client["states"]["is_floating"]),
-            n_monitors=len(monitors),
-        )
         essential_ok = True
         for action in plan_restore(rec, live):
             try:
-                if action.verb == "tagmon":
-                    status = self._tagmon_to_target(rec, action.args, target,
-                                                    len(monitors), logger)
-                    if status != _STEP_OK:
-                        essential_ok = False
-                    if status == _STEP_FOCUS_LOST:
-                        break   # B-4: dwm is not focusing; touch nothing else
-                elif action.verb == "tag":
-                    if not self._focus_and_confirm(rec.xid, logger):
-                        essential_ok = False
-                        break   # B-4: a `tag` on the WRONG client is the whole bug
-                    if not self._run_verb("tag", action.args, logger=logger,
-                                          pid=rec.pid, xid=rec.xid):
-                        essential_ok = False
-                elif action.verb == "togglefloating":
-                    if not self._focus_and_confirm(rec.xid, logger):
-                        break   # B-4: cosmetic, but never on someone else's window
-                    self._run_verb("togglefloating", logger=logger, pid=rec.pid, xid=rec.xid)
-                elif action.verb == "configure":
-                    origin = monitor_origin(monitors, target)
-                    if origin is None:
-                        # WM-08 fail-safe: without the target monitor origin we
-                        # cannot convert the absolute captured geometry to the
-                        # monitor-relative coords dwm's configurerequest expects,
-                        # so sending it would land the window wrong. Skip the
-                        # geometry restore (monitor/tag/floating already applied)
-                        # and log, never guess or crash.
-                        logev(logger, logging.WARNING, "relocate_geometry_skip",
-                              "target monitor origin unresolved; skipping floating "
-                              "geometry restore (window kept on target, geometry left "
-                              "as dwm placed it)",
-                              pid=rec.pid, xid=rec.xid, target=target)
-                        continue
-                    rel = to_monitor_relative_geometry(action.args, origin)
-                    if not self._focus_and_confirm(rec.xid, logger):
-                        # B-4: configure_geometry is XID-targeted, so unlike the
-                        # verbs it cannot hit the wrong window -- but an
-                        # unconfirmed focus means the preceding steps did not land
-                        # either, so the window is not on the monitor this
-                        # geometry was computed against. Skip rather than shove it
-                        # to coordinates that no longer mean anything.
-                        break
-                    self._control.configure_geometry(rec.xid, rel)
+                accepted, abort = self._run_restore_action(
+                    rec, action, live.target_monitor, monitors, logger)
             except Exception as e:  # per-step guard is the WM-08 one-failure-never-aborts-window contract
                 # One failed step never aborts the window and never crashes -- but
                 # a RAISED essential step is just as much a non-restore as a
@@ -989,6 +1016,13 @@ class RelocationCoordinator:
                 if action.verb in _ESSENTIAL_VERBS:
                     essential_ok = False
                 continue
+            # B-3: a non-accepted step only sinks the restore when the verb is
+            # ESSENTIAL -- the same membership test the raise path above uses, so
+            # the two ways a step can fail cannot drift apart.
+            if not accepted and action.verb in _ESSENTIAL_VERBS:
+                essential_ok = False
+            if abort:
+                break   # B-4: dwm is not focusing; touch nothing else
         if not essential_ok:
             logev(logger, logging.WARNING, "relocate_restore_incomplete",
                   "an essential restore step (tagmon/tag) did not take effect; the window "
